@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+- Added a `wordchain.player` permission group for LuckPerms and separate permission nodes for the basic menu, leaderboard, duel, duel responses, and word reports.
+- Documented the LuckPerms command to grant the basic player permissions to its default group.
+
 ## 1.2.0
 
 - Add streaming import for the NhanAZ Vietnamese dictionary 0.4.0-beta release and cache successful source imports.

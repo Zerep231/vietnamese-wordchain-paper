@@ -6,7 +6,7 @@ A Vietnamese word-chain minigame for Paper 26.2+ and Java 25. It imports UTF-8 w
 
 ## Build and install
 
-Run `mvn package` with Java 25. Copy `target/word-chain-1.2.0.jar` into the server's `plugins` folder and restart. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`. The bundled SQLite driver supports Linux x86_64/aarch64 (glibc and musl), Windows x86_64, and macOS x86_64/aarch64 servers.
+Run `mvn package` with Java 25. Copy `target/word-chain-1.2.1.jar` into the server's `plugins` folder and restart. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`. The bundled SQLite driver supports Linux x86_64/aarch64 (glibc and musl), Windows x86_64, and macOS x86_64/aarch64 servers.
 
 ## Commands and permissions
 
@@ -34,6 +34,16 @@ Run `mvn package` with Java 25. Copy `target/word-chain-1.2.0.jar` into the serv
 | `/wordchain reload` | Reload configuration | `wordchain.admin` |
 
 Set `game.members-can-control: false` to restrict start/stop/reset to `wordchain.admin`. The menu actions use the same permission checks as commands.
+
+### LuckPerms setup
+
+Basic player permissions are available to everyone by default. To assign them explicitly to LuckPerms' default group, run:
+
+```text
+/lp group default permission set wordchain.player true
+```
+
+`wordchain.player` includes `wordchain.play`, `wordchain.menu`, `wordchain.top`, `wordchain.duel`, `wordchain.duel.respond`, and `wordchain.report`. Remove a specific permission from the default group to restrict that command, for example `/lp group default permission set wordchain.duel false`. Admin permissions remain separate: `wordchain.admin`, `wordchain.rewards`, and `wordchain.stats`.
 
 ## Configuration
 

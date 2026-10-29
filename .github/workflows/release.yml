@@ -23,4 +23,4 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" target/word-chain-1.2.0.jar --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" target/word-chain-1.2.1.jar --generate-notes

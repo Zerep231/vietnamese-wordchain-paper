@@ -161,17 +161,17 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             }
             case "stop" -> { if (!canControl(sender)) return deny(sender); cancelNextMatch(); game.stop(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
             case "reset" -> { if (!canControl(sender)) return deny(sender); cancelNextMatch(); game.reset(); Bukkit.broadcast(message("<yellow>Ván Nối Từ đã được đặt lại.")); }
-            case "menu" -> { if (sender instanceof Player p) openMenu(p); else sender.sendMessage("Lệnh này chỉ dành cho người chơi."); }
-            case "top" -> showTop(sender);
+            case "menu" -> { if (!sender.hasPermission("wordchain.menu")) return deny(sender); if (sender instanceof Player p) openMenu(p); else sender.sendMessage("Lệnh này chỉ dành cho người chơi."); }
+            case "top" -> { if (!sender.hasPermission("wordchain.top")) return deny(sender); showTop(sender); }
             case "wins" -> { if (!(sender.hasPermission("wordchain.admin") || sender.hasPermission("wordchain.stats"))) return deny(sender); if (args.length != 2) { sender.sendMessage(message("<yellow>Dùng: /wordchain wins <player>")); return true; } showPlayerStats(sender, args[1]); }
             case "rewards" -> { if (!(sender instanceof Player p) || !(sender.hasPermission("wordchain.admin")||sender.hasPermission("wordchain.rewards"))) return deny(sender); openRewardsMenu(p); }
             case "reward" -> { if (!(sender.hasPermission("wordchain.admin")||sender.hasPermission("wordchain.rewards"))) return deny(sender); editReward(sender, args); }
             case "difficulty" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); setDifficulty(sender, args); }
-            case "duel" -> createDuelInvite(sender,args);
-            case "accept" -> acceptDuel(sender,args);
-            case "deny" -> denyDuel(sender,args);
+            case "duel" -> { if (!sender.hasPermission("wordchain.duel")) return deny(sender); createDuelInvite(sender,args); }
+            case "accept" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); acceptDuel(sender,args); }
+            case "deny" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); denyDuel(sender,args); }
             case "add" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain add <tiếng1 tiếng2>")); return true; } String phrase = normalizePhrase(args[1] + " " + args[2]); addWordAsync(sender, phrase); }
-            case "report" -> reportWord(sender, args);
+            case "report" -> { if (!sender.hasPermission("wordchain.report")) return deny(sender); reportWord(sender, args); }
             case "reports" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); showReports(sender); }
             case "approve", "reject" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain " + sub + " <tiếng1 tiếng2>")); return true; } reviewReport(sender, sub.equals("approve"), normalizePhrase(args[1] + " " + args[2])); }
             case "remove" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain remove <tiếng1 tiếng2>")); return true; } removeWord(sender, normalizePhrase(args[1] + " " + args[2])); }
