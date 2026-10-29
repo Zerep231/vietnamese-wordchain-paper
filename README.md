@@ -6,7 +6,7 @@ A Vietnamese word-chain minigame for Paper 26.2+ and Java 25. It imports UTF-8 w
 
 ## Build and install
 
-Run `mvn verify` with Java 25. Copy `target/word-chain-1.3.0.jar` into the server's `plugins` folder and restart. Paper downloads SQLite JDBC as a declared library on first startup. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`.
+Run `mvn verify` with Java 25. Copy `target/word-chain-1.3.1.jar` into the server's `plugins` folder and restart. Paper downloads SQLite JDBC as a declared library on first startup. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`.
 
 ## Commands and permissions
 
@@ -54,7 +54,7 @@ Basic player permissions are available to everyone by default. To assign them ex
 - `game.recent-start-limit`: number of recent random start phrases to avoid repeating.
 - `game.reset-vote-seconds`: how long a public reset vote stays open (5–120 seconds).
 - `rewards.items`: list of `MATERIAL:amount` rewards, for example `DIAMOND:3`.
-- `dictionary.sources`: source entries use `plain|URL`, `tab|URL`, `kaikki|URL`, or `tu-dien-archive|URL`. The NhanAZ release archive streams through the importer; only `data/processed/words/*.json` is parsed and only exactly two-syllable headwords are indexed. The 124 MB archive is not stored on disk.
+- `dictionary.sources`: source entries use `plain|URL`, `tab|URL`, `json-array|URL` (JSON objects with a `text` field), `kaikki|URL`, or `tu-dien-archive|URL`. The Vietnamese-dictionary-api JSON is streamed from GitHub Raw and only exactly two-syllable phrases are indexed. The NhanAZ release archive also streams through the importer; only `data/processed/words/*.json` is parsed. The 124 MB archive is not stored on disk.
 - `dictionary.refresh-on-start`: check configured sources asynchronously on startup. Imported source URLs are recorded in SQLite and skipped on later starts; `/wordchain import` forces a refresh.
 - `menu.title`: MiniMessage inventory title.
 - `streak-rewards`: logarithmic win-streak multiplier and payout caps. The formula is `min(cap, 1 + rate * log2(streak))`.
@@ -67,7 +67,7 @@ The admin menu includes reward editing and a wins/streak browser. `wordchain.rew
 
 Public-game streaks count consecutive server-wide match winners. Duel wins advance the winner's streak and reset only the opponent's streak. Phrase difficulty defaults to level 1; admins can tag a phrase from 1 to 5. If a difficulty rule or used-word limit leaves no legal continuation, the round resets with a fresh random keyword instead of stalling. Starts avoid recent keywords where possible. Invalid two-syllable moves receive a private hint with a short per-player cooldown; longer chat messages are ignored.
 
-The default sources are the Viet39K phrase list and the [NhanAZ-Drops Vietnamese dictionary release](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/tag/v0.4.0-beta). The upstream release reports 89,569 dictionary headwords and contains mixed per-source terms (MIT, GPL, CC BY-SA/GFDL, public domain, and some sources marked license-unclear). The plugin downloads the archive at runtime and does not bundle or republish the data. Review the upstream [data card](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/blob/main/reports/current/DATA_CARD.md) before redistributing imported database contents.
+The default sources include the Viet39K phrase list, the [`Vietnamese-dictionary-api` JSON dataset](https://github.com/MegumiKatou02/Vietnamese-dictionary-api/blob/main/vietnamese_words.json), and the [NhanAZ-Drops Vietnamese dictionary release](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/tag/v0.4.0-beta). The API repository is marked AGPL-3.0 and describes itself as an API test project; the dictionary data's separate license and provenance are not stated clearly. This plugin streams the JSON file without bundling it. Review the upstream terms before redistributing imported database contents. The NhanAZ release reports 89,569 headwords and contains mixed per-source terms (MIT, GPL, CC BY-SA/GFDL, public domain, and some sources marked license-unclear); review its [data card](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/blob/main/reports/current/DATA_CARD.md) before redistribution.
 
 The [Kaikki Vietnamese Wiktionary extract](https://kaikki.org/viwiktionary/rawdata.html) is a machine-readable Wiktionary dump. Wiktionary-derived material is provided under CC BY-SA / GFDL terms; keep attribution and share-alike obligations in mind when redistributing data.
 

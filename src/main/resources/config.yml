@@ -13,11 +13,13 @@ rewards:
     - "EMERALD:5"
 dictionary:
   # Sources may be plain|URL (one phrase per line), tab|URL (entry in column one),
-  # kaikki|URL (Kaikki/Wiktionary JSONL), or tu-dien-archive|URL (release tar.gz).
+  # json-array|URL (JSON objects with a text property), kaikki|URL (Wiktionary JSONL),
+  # or tu-dien-archive|URL (release tar.gz).
   # The 124 MB archive is streamed without saving it to disk; successful sources are cached in SQLite.
   # Only Vietnamese entries that are exactly two syllables are indexed.
   sources:
     - "plain|https://raw.githubusercontent.com/duyet/vietnamese-wordlist/master/Viet39K.txt"
+    - "json-array|https://raw.githubusercontent.com/MegumiKatou02/Vietnamese-dictionary-api/main/vietnamese_words.json"
     - "tu-dien-archive|https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/download/v0.4.0-beta/tu-dien-tieng-viet-0.4.0-beta-documented.tar.gz"
     # Enable on demand if desired; the compressed Wiktionary extract is about 33 MB.
     # - "kaikki|https://kaikki.org/viwiktionary/raw-wiktextract-data.jsonl.gz"

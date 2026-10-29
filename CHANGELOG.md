@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+- Added a streaming JSON-array importer for the Vietnamese-dictionary-api `text` entries and enabled its 3.9 MB source by default.
+- Existing installations add the source once through a config migration; admins can then remove it to opt out.
+- Added parser tests for normalization, exactly two syllables, nested fields, and escaped Unicode.
+
 ## 1.3.0
 - Changed player reset into a public vote for a fresh random round; one-third of online players must accept, one-third rejecting declines, and proposals expire.
 - Kept duel phrase turns private to both duelists and prevented duel chat from being broadcast to the world.

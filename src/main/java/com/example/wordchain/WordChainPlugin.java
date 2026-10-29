@@ -40,6 +40,7 @@ import org.bukkit.plugin.ServicePriority;
 public final class WordChainPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final String TUDIEN_ARCHIVE_SOURCE = "tu-dien-archive|https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/download/v0.4.0-beta/tu-dien-tieng-viet-0.4.0-beta-documented.tar.gz";
+    private static final String MEGUMI_JSON_SOURCE = "json-array|https://raw.githubusercontent.com/MegumiKatou02/Vietnamese-dictionary-api/main/vietnamese_words.json";
     private final Map<UUID, Long> reportCooldown = new HashMap<>();
     private final Map<UUID, Long> wrongMoveNotice = new HashMap<>();
     private final Map<UUID,DuelInvite> duelInvites = new ConcurrentHashMap<>();
@@ -98,6 +99,12 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         boolean changed = false;
         List<String> sources = new ArrayList<>(getConfig().getStringList("dictionary.sources"));
         if (!sources.contains(TUDIEN_ARCHIVE_SOURCE)) { sources.add(TUDIEN_ARCHIVE_SOURCE); getConfig().set("dictionary.sources", sources); changed = true; }
+        if (!getConfig().getBoolean("dictionary.migrations.megumi-json-added", false)) {
+            if (!sources.contains(MEGUMI_JSON_SOURCE)) sources.add(MEGUMI_JSON_SOURCE);
+            getConfig().set("dictionary.sources", sources);
+            getConfig().set("dictionary.migrations.megumi-json-added", true);
+            changed = true;
+        }
         if (!getConfig().contains("game.recent-start-limit")) { getConfig().set("game.recent-start-limit", 20); changed = true; }
         if (!getConfig().contains("game.reset-vote-seconds")) { getConfig().set("game.reset-vote-seconds", 30); changed = true; }
         if (changed) saveConfig();
@@ -276,10 +283,11 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         try {
                 int beforeSource = imported;
                 String[] source = spec.split("\\|", 2); String format = source.length == 2 ? source[0].trim().toLowerCase(Locale.ROOT) : "plain"; String url = source.length == 2 ? source[1].trim() : spec.trim();
-                var conn = new URL(url).openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(Math.max(timeout, format.equals("tu-dien-archive") ? 60 : timeout) * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.2 (dictionary importer)");
+                var conn = new URL(url).openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(Math.max(timeout, format.equals("tu-dien-archive") ? 60 : timeout) * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.3 (dictionary importer)");
                 int sourceAdded;
                 try (InputStream raw = conn.getInputStream()) {
                     if (format.equals("tu-dien-archive")) sourceAdded = importTuDienArchive(raw, maxLength);
+                    else if (format.equals("json-array")) sourceAdded = importJsonPhraseArray(raw, maxLength);
                     else {
                         InputStream stream = url.endsWith(".gz") ? new java.util.zip.GZIPInputStream(raw) : raw;
                         List<String> batch = new ArrayList<>(512); long charsRead = 0; int lineCount = 0;
@@ -301,11 +309,26 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                     }
                 }
                 markSourceImported(spec, sourceAdded);
-                if (format.equals("tu-dien-archive")) imported += sourceAdded;
-            } catch (Exception e) { if (reportErrors || spec.startsWith("tu-dien-archive|")) getLogger().warning("Dictionary source failed " + spec + ": " + e.getMessage()); }
+                if (format.equals("tu-dien-archive") || format.equals("json-array")) imported += sourceAdded;
+            } catch (Exception e) { if (reportErrors || spec.startsWith("tu-dien-archive|") || spec.startsWith("json-array|")) getLogger().warning("Dictionary source failed " + spec + ": " + e.getMessage()); }
         }
         refreshWordIndex();
         return imported;
+    }
+
+    private int importJsonPhraseArray(InputStream source, int maxLength) throws IOException {
+        List<String> batch = new ArrayList<>(512);
+        int[] added = {0};
+        InputStream bounded = new BoundedInputStream(source, 32L * 1024 * 1024);
+        try (Reader reader = new BufferedReader(new InputStreamReader(bounded, StandardCharsets.UTF_8), 16 * 1024)) {
+            JsonPhraseArrayImporter.importPhrases(reader, "text", maxLength, phrase -> {
+                batch.add(phrase);
+                if (batch.size() >= 512) { added[0] += importBatch(batch); batch.clear(); }
+            });
+        }
+        if (!batch.isEmpty()) added[0] += importBatch(batch);
+        getLogger().info("Imported " + added[0] + " new two-syllable phrases from the Vietnamese-dictionary-api JSON source.");
+        return added[0];
     }
 
     private int importTuDienArchive(InputStream input, int maxLength) throws IOException {
