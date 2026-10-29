@@ -39,16 +39,19 @@ import org.bukkit.plugin.ServicePriority;
 
 public final class WordChainPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private static final MiniMessage MM = MiniMessage.miniMessage();
+    private static final String TUDIEN_ARCHIVE_SOURCE = "tu-dien-archive|https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/download/v0.4.0-beta/tu-dien-tieng-viet-0.4.0-beta-documented.tar.gz";
     private final Map<UUID, Long> reportCooldown = new HashMap<>();
     private final Map<UUID, Long> wrongMoveNotice = new HashMap<>();
     private final Map<UUID,DuelInvite> duelInvites = new ConcurrentHashMap<>();
     private final Map<UUID,DuelMatch> duels = new ConcurrentHashMap<>();
+    private final LinkedHashSet<String> recentStartingWords = new LinkedHashSet<>();
     private final AtomicBoolean importRunning = new AtomicBoolean();
     private final Object configWriteLock = new Object();
     private long configRevision;
     private volatile long writtenConfigRevision;
     private final Set<String> dictionary = ConcurrentHashMap.newKeySet();
     private volatile List<String> dictionaryIndex = List.of();
+    private volatile Map<String,List<String>> dictionaryByFirstSyllable = Map.of();
     private volatile boolean dictionaryReady;
     private WordChainApi api;
     private org.bukkit.scheduler.BukkitTask nextMatchTask;
@@ -57,6 +60,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     @Override public void onEnable() {
         saveDefaultConfig();
+        migrateConfigDefaults();
         try {
             Class.forName("org.sqlite.JDBC");
             connection = DriverManager.getConnection("jdbc:sqlite:" + getDataFolder().toPath().resolve("wordchain.db"));
@@ -66,6 +70,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS wins (uuid TEXT PRIMARY KEY, player_name TEXT NOT NULL, wins INTEGER NOT NULL DEFAULT 0, current_streak INTEGER NOT NULL DEFAULT 0, best_streak INTEGER NOT NULL DEFAULT 0)");
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS word_reports (phrase TEXT PRIMARY KEY, reporter_uuid TEXT NOT NULL, reporter_name TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING')");
                 s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_reports_status ON word_reports(status, created_at)");
+                s.executeUpdate("CREATE TABLE IF NOT EXISTS dictionary_sources (source TEXT PRIMARY KEY, imported_at INTEGER NOT NULL, entries_added INTEGER NOT NULL)");
             }
             ensureColumn("wins", "current_streak", "INTEGER NOT NULL DEFAULT 0");
             ensureColumn("wins", "best_streak", "INTEGER NOT NULL DEFAULT 0");
@@ -85,6 +90,14 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (refresh) scheduleImport(null, false);
         else Bukkit.getScheduler().runTaskAsynchronously(this, this::loadDictionaryCache);
         getLogger().info("WordChain enabled; loading indexed dictionary asynchronously.");
+    }
+
+    private void migrateConfigDefaults() {
+        boolean changed = false;
+        List<String> sources = new ArrayList<>(getConfig().getStringList("dictionary.sources"));
+        if (!sources.contains(TUDIEN_ARCHIVE_SOURCE)) { sources.add(TUDIEN_ARCHIVE_SOURCE); getConfig().set("dictionary.sources", sources); changed = true; }
+        if (!getConfig().contains("game.recent-start-limit")) { getConfig().set("game.recent-start-limit", 20); changed = true; }
+        if (changed) saveConfig();
     }
 
     @Override public void onDisable() {
@@ -113,7 +126,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     private void processMove(UUID id, String playerName, String raw) {
         DuelMatch duel=duels.get(id); if(duel!=null){ processDuelMove(duel,id,playerName,raw); return; }
-        if (!game.tryMove(raw, this::isValidWord)) { notifyInvalidMove(id, raw); return; }
+        if (!game.isActive()) return;
+        if (!game.tryMove(raw, this::isValidWord)) { if (!game.hasLegalContinuation()) resetPublicRound(); else notifyInvalidMove(id, raw); return; }
         String clean = normalizePhrase(raw);
         Bukkit.broadcast(message("<green>" + escape(playerName) + " nối thành công: <yellow>" + escape(clean) + "</yellow>. Tiếng tiếp theo: <gold>" + escape(game.requiredSyllable()) + "</gold>.</green>"));
         Bukkit.getPluginManager().callEvent(new WordChainMoveEvent(id, playerName, clean));
@@ -122,7 +136,15 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             saveWin(id, playerName, true, false, null);
             Bukkit.broadcast(message("<gold><bold>" + escape(playerName) + " đã chiến thắng trò Nối Từ!"));
             startNextMatch();
+        } else if (!game.hasLegalContinuation()) {
+            resetPublicRound();
         }
+    }
+
+    private void resetPublicRound() {
+        String next = randomStartingWord();
+        if (next == null) { game.stop(); Bukkit.broadcast(message("<yellow>Ván đã được đặt lại vì không còn nước nối hợp lệ; chưa có từ mở màn phù hợp.")); }
+        else { rememberStartingWord(next); game.start(next); Bukkit.broadcast(message("<yellow>Không còn nước nối hợp lệ. Ván mới bắt đầu với từ khóa ngẫu nhiên: <gold>" + escape(next) + "</gold>.")); }
     }
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -132,8 +154,9 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 if (!canControl(sender)) return deny(sender);
                 if (!dictionaryReady || importRunning.get()) { sender.sendMessage(message("<yellow>Đang nạp từ điển, vui lòng thử lại sau.")); return true; }
                 if (game.isActive()) { sender.sendMessage(message("<yellow>Ván đang diễn ra. Dùng /wordchain reset để bắt đầu lại.")); return true; }
-                String start = args.length > 1 ? normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))) : normalizePhrase(getConfig().getString("game.starting-word", "phong cảnh"));
-                if (!isTwoSyllablePhrase(start) || !isValidWord(start)) { sender.sendMessage(message("<red>Từ bắt đầu phải là cụm đúng hai tiếng có trong từ điển.")); return true; }
+                String start = args.length > 1 ? normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))) : randomStartingWord();
+                if (start == null || !isTwoSyllablePhrase(start) || !isValidWord(start) || !hasContinuation(start, Map.of(start, 1), initialHardRun(start))) { sender.sendMessage(message("<red>Không có từ mở màn phù hợp. Hãy nạp thêm dữ liệu từ điển.")); return true; }
+                rememberStartingWord(start);
                 cancelNextMatch(); game.start(start); Bukkit.broadcast(message("<green>Trò Nối Từ bắt đầu! Từ đầu tiên: <yellow>" + escape(start) + "</yellow>."));
             }
             case "stop" -> { if (!canControl(sender)) return deny(sender); cancelNextMatch(); game.stop(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
@@ -179,7 +202,61 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         }
     }
 
-    private void refreshWordIndex() { dictionaryIndex = List.copyOf(dictionary); }
+    private void refreshWordIndex() {
+        List<String> words = List.copyOf(dictionary);
+        Map<String,List<String>> grouped = new HashMap<>();
+        for (String phrase : words) {
+            int separator = phrase.indexOf(' '); if (separator < 1) continue;
+            grouped.computeIfAbsent(phrase.substring(0, separator), ignored -> new ArrayList<>()).add(phrase);
+        }
+        Map<String,List<String>> immutable = new HashMap<>();
+        grouped.forEach((syllable, phrases) -> immutable.put(syllable, List.copyOf(phrases)));
+        dictionaryByFirstSyllable = Map.copyOf(immutable);
+        dictionaryIndex = words;
+    }
+
+    private int initialHardRun(String phrase) {
+        int threshold = getConfig().getInt("difficulty.hard-threshold", 4);
+        return getConfig().getInt("difficulty.words." + phrase, 1) >= threshold ? 1 : 0;
+    }
+    private boolean hasContinuation(String phrase, Map<String,Integer> uses, int hardRun) {
+        int split = phrase.indexOf(' '); if (split < 0) return false;
+        List<String> candidates = dictionaryByFirstSyllable.get(phrase.substring(split + 1)); if (candidates == null) return false;
+        int limit = Math.max(1, Math.min(5, getConfig().getInt("anti-abuse.word-use-limit", 3)));
+        int threshold = getConfig().getInt("difficulty.hard-threshold", 4);
+        int maxHard = Math.max(1, getConfig().getInt("anti-abuse.max-hard-words-in-row", 2));
+        for (String candidate : candidates) {
+            if (uses.getOrDefault(candidate, 0) >= limit) continue;
+            if (getConfig().getInt("difficulty.words." + candidate, 1) >= threshold && hardRun >= maxHard) continue;
+            return true;
+        }
+        return false;
+    }
+    private String randomStartingWord() {
+        List<String> words = dictionaryIndex; if (words.isEmpty()) return null;
+        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+        int tries = Math.min(64, words.size());
+        for (int i = 0; i < tries; i++) {
+            String candidate = words.get(random.nextInt(words.size()));
+            if (!recentStartingWords.contains(candidate) && hasContinuation(candidate, Map.of(candidate, 1), initialHardRun(candidate))) return candidate;
+        }
+        int start = random.nextInt(words.size());
+        int scanLimit = Math.min(words.size(), 4096);
+        for (int i = 0; i < scanLimit; i++) {
+            String candidate = words.get((start + i) % words.size());
+            if (!recentStartingWords.contains(candidate) && hasContinuation(candidate, Map.of(candidate, 1), initialHardRun(candidate))) return candidate;
+        }
+        for (int i = 0; i < scanLimit; i++) {
+            String candidate = words.get((start + i) % words.size());
+            if (hasContinuation(candidate, Map.of(candidate, 1), initialHardRun(candidate))) return candidate;
+        }
+        return null;
+    }
+    private void rememberStartingWord(String phrase) {
+        recentStartingWords.add(phrase);
+        int limit = Math.max(0, Math.min(1000, getConfig().getInt("game.recent-start-limit", 20)));
+        while (recentStartingWords.size() > limit) recentStartingWords.remove(recentStartingWords.iterator().next());
+    }
 
     private void ensureColumn(String table, String column, String definition) throws SQLException {
         boolean found = false;
@@ -187,32 +264,188 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (!found) try (Statement s = connection.createStatement()) { s.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition); }
     }
 
-    private int importSources(List<String> urls, int timeout, int maxLength, boolean reportErrors) {
+    private int importSources(List<String> urls, int timeout, int maxLength, boolean reportErrors, boolean skipImported) {
         int imported = 0;
         for (String spec : urls) {
-            try {
+            if (skipImported && wasSourceImported(spec)) continue;
+        try {
+                int beforeSource = imported;
                 String[] source = spec.split("\\|", 2); String format = source.length == 2 ? source[0].trim().toLowerCase(Locale.ROOT) : "plain"; String url = source.length == 2 ? source[1].trim() : spec.trim();
-                var conn = new URL(url).openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(timeout * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.1 (dictionary importer)");
-                InputStream stream = conn.getInputStream(); if (url.endsWith(".gz")) stream = new java.util.zip.GZIPInputStream(stream);
-                List<String> batch = new ArrayList<>(512); long charsRead = 0; int lineCount = 0;
-                try (BufferedReader lines = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8), 16 * 1024)) {
-                    String line; while ((line = lines.readLine()) != null) {
-                        charsRead += line.length(); if (++lineCount > 1_000_000 || charsRead > 256_000_000L) break;
-                        if (line.length() > 16_384) continue;
-                        String phrase = switch (format) {
-                            case "kaikki", "wiktionary-jsonl" -> extractVietnameseHeadword(line);
-                            case "tab", "tudientv" -> line.split("\\t", 2)[0];
-                            default -> line;
-                        };
-                        if (phrase != null) { String normalized = normalizePhrase(phrase.replaceFirst("^\\uFEFF", "")); if (isTwoSyllablePhrase(normalized) && normalized.length() <= maxLength && normalized.matches("[\\p{L}\\p{M} ]+")) batch.add(normalized); }
-                        if (batch.size() >= 512) { imported += importBatch(batch); batch.clear(); }
+                var conn = new URL(url).openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(Math.max(timeout, format.equals("tu-dien-archive") ? 60 : timeout) * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.2 (dictionary importer)");
+                int sourceAdded;
+                try (InputStream raw = conn.getInputStream()) {
+                    if (format.equals("tu-dien-archive")) sourceAdded = importTuDienArchive(raw, maxLength);
+                    else {
+                        InputStream stream = url.endsWith(".gz") ? new java.util.zip.GZIPInputStream(raw) : raw;
+                        List<String> batch = new ArrayList<>(512); long charsRead = 0; int lineCount = 0;
+                        try (BufferedReader lines = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8), 16 * 1024)) {
+                            String line; while ((line = lines.readLine()) != null) {
+                                charsRead += line.length(); if (++lineCount > 1_000_000 || charsRead > 256_000_000L) break;
+                                if (line.length() > 16_384) continue;
+                                String phrase = switch (format) {
+                                    case "kaikki", "wiktionary-jsonl" -> extractVietnameseHeadword(line);
+                                    case "tab", "tudientv" -> line.split("\\t", 2)[0];
+                                    default -> line;
+                                };
+                                if (phrase != null) { String normalized = normalizePhrase(phrase.replaceFirst("^\\uFEFF", "")); if (isTwoSyllablePhrase(normalized) && normalized.length() <= maxLength && normalized.matches("[\\p{L}\\p{M} ]+")) batch.add(normalized); }
+                                if (batch.size() >= 512) { imported += importBatch(batch); batch.clear(); }
+                            }
+                        }
+                        if (!batch.isEmpty()) imported += importBatch(batch);
+                        sourceAdded = imported - beforeSource;
                     }
                 }
-                if (!batch.isEmpty()) imported += importBatch(batch);
-            } catch (Exception e) { if (reportErrors) getLogger().warning("Dictionary source failed " + spec + ": " + e.getMessage()); }
+                markSourceImported(spec, sourceAdded);
+                if (format.equals("tu-dien-archive")) imported += sourceAdded;
+            } catch (Exception e) { if (reportErrors || spec.startsWith("tu-dien-archive|")) getLogger().warning("Dictionary source failed " + spec + ": " + e.getMessage()); }
         }
         refreshWordIndex();
         return imported;
+    }
+
+    private int importTuDienArchive(InputStream input, int maxLength) throws IOException {
+        int imported = 0; int wordFiles = 0; long archiveBytes = 0;
+        List<String> batch = new ArrayList<>(512);
+        try (java.util.zip.GZIPInputStream tar = new java.util.zip.GZIPInputStream(new BufferedInputStream(input), 64 * 1024)) {
+            byte[] header = new byte[512];
+            while (readBlock(tar, header)) {
+                if (isZeroBlock(header)) break;
+                long size = parseTarOctal(header, 124, 12); archiveBytes += 512 + size + ((512 - size % 512) % 512);
+                if (archiveBytes > 2L * 1024 * 1024 * 1024) throw new IOException("Tar archive exceeds 2 GiB unpacked limit");
+                String name = tarName(header); boolean file = header[156] == 0 || header[156] == '0';
+                boolean wordFile = file && name.matches("data/processed/words/[a-z]\\.json");
+                if (wordFile) {
+                    if (size > 64L * 1024 * 1024) throw new IOException("Word bucket exceeds 64 MiB: " + name);
+                    wordFiles++;
+                    BoundedInputStream bounded = new BoundedInputStream(tar, size);
+                    try (Reader reader = new BufferedReader(new InputStreamReader(bounded, StandardCharsets.UTF_8), 16 * 1024)) {
+                        imported += importWordArray(reader, batch, maxLength);
+                    }
+                    if (!batch.isEmpty()) { imported += importBatch(batch); batch.clear(); }
+                } else {
+                    if (wordFiles > 0 && name.startsWith("data/processed/") && !name.startsWith("data/processed/words/")) break;
+                    skipFully(tar, size);
+                }
+                long padding = (512 - size % 512) % 512; skipFully(tar, padding);
+            }
+        }
+        if (!batch.isEmpty()) imported += importBatch(batch);
+        if (wordFiles != 26) throw new IOException("Expected all 26 dictionary word buckets, found " + wordFiles);
+        getLogger().info("Imported " + wordFiles + " Vietnamese dictionary word buckets from the tu-dien-tieng-viet release.");
+        return imported;
+    }
+
+    private int importWordArray(Reader source, List<String> batch, int maxLength) throws IOException {
+        PushbackReader reader = new PushbackReader(source, 2); int added = 0;
+        expectJson(reader, '['); char next = nextJson(reader);
+        while (next != ']') {
+            if (next != '{') throw new IOException("Expected a dictionary word object");
+            String word = null; char field = nextJson(reader);
+            while (field != '}') {
+                if (field != '"') throw new IOException("Expected a JSON field name");
+                reader.unread(field); String key = readJsonString(reader); expectJson(reader, ':'); char valueStart = nextJson(reader); reader.unread(valueStart);
+                if (key.equals("word") && valueStart == '"') word = readJsonString(reader); else skipJsonValue(reader);
+                field = nextJson(reader);
+                if (field == ',') field = nextJson(reader); else if (field != '}') throw new IOException("Expected ',' or '}' in dictionary word");
+            }
+            if (word != null) {
+                String normalized = normalizePhrase(word);
+                if (isTwoSyllablePhrase(normalized) && normalized.length() <= maxLength && normalized.matches("[\\p{L}\\p{M} ]+")) {
+                    batch.add(normalized);
+                    if (batch.size() >= 512) { added += importBatch(batch); batch.clear(); }
+                }
+            }
+            next = nextJson(reader);
+            if (next == ',') next = nextJson(reader); else if (next != ']') throw new IOException("Expected ',' or ']' in dictionary word array");
+        }
+        while (reader.read() != -1) { /* drain the bounded tar entry before reading its padding */ }
+        return added;
+    }
+
+    private static char nextJson(PushbackReader reader) throws IOException {
+        int value; do { value = reader.read(); } while (value >= 0 && Character.isWhitespace(value));
+        if (value < 0) throw new IOException("Unexpected end of JSON dictionary bucket");
+        return (char) value;
+    }
+    private static void expectJson(PushbackReader reader, char expected) throws IOException { char actual = nextJson(reader); if (actual != expected) throw new IOException("Expected '" + expected + "' in dictionary bucket"); }
+    private static String readJsonString(PushbackReader reader) throws IOException {
+        expectJson(reader, '"'); StringBuilder value = new StringBuilder(); int ch;
+        while ((ch = reader.read()) >= 0) {
+            if (ch == '"') return value.toString();
+            if (ch != '\\') { if (value.length() >= 4096) throw new IOException("JSON string exceeds 4096 characters"); value.append((char) ch); continue; }
+            int escaped = reader.read(); if (escaped < 0) break;
+            switch (escaped) {
+                case '"', '\\', '/' -> value.append((char) escaped);
+                case 'b' -> value.append('\b'); case 'f' -> value.append('\f'); case 'n' -> value.append('\n'); case 'r' -> value.append('\r'); case 't' -> value.append('\t');
+                case 'u' -> { int code = 0; for (int i = 0; i < 4; i++) { int digit = Character.digit(reader.read(), 16); if (digit < 0) throw new IOException("Invalid Unicode escape in dictionary bucket"); code = (code << 4) | digit; } if (value.length() >= 4096) throw new IOException("JSON string exceeds 4096 characters"); value.append((char) code); }
+                default -> throw new IOException("Invalid JSON string escape in dictionary bucket");
+            }
+        }
+        throw new IOException("Unterminated JSON string in dictionary bucket");
+    }
+    private static void skipJsonValue(PushbackReader reader) throws IOException {
+        char first = nextJson(reader);
+        if (first == '"') { skipJsonString(reader); return; }
+        if (first == '{' || first == '[') {
+            Deque<Character> closers = new ArrayDeque<>(); closers.push(first == '{' ? '}' : ']'); boolean quoted = false, escaped = false; int ch;
+            while (!closers.isEmpty() && (ch = reader.read()) >= 0) {
+                if (quoted) { if (escaped) escaped = false; else if (ch == '\\') escaped = true; else if (ch == '"') quoted = false; continue; }
+                if (ch == '"') quoted = true; else if (ch == '{') closers.push('}'); else if (ch == '[') closers.push(']'); else if (ch == closers.peek()) closers.pop();
+                if (closers.size() > 128) throw new IOException("JSON nesting exceeds 128 levels");
+            }
+            if (!closers.isEmpty()) throw new IOException("Unclosed JSON value in dictionary bucket");
+            return;
+        }
+        int ch; while ((ch = reader.read()) >= 0) { if (ch == ',' || ch == '}' || ch == ']') { reader.unread(ch); return; } }
+    }
+    private static void skipJsonString(PushbackReader reader) throws IOException {
+        boolean escaped = false; int ch;
+        while ((ch = reader.read()) >= 0) {
+            if (escaped) {
+                if (ch == 'u') {
+                    for (int i = 0; i < 4; i++) if (Character.digit(reader.read(), 16) < 0) throw new IOException("Invalid Unicode escape in dictionary bucket");
+                } else if (ch != '"' && ch != '\\' && ch != '/' && ch != 'b' && ch != 'f' && ch != 'n' && ch != 'r' && ch != 't') {
+                    throw new IOException("Invalid JSON string escape in dictionary bucket");
+                }
+                escaped = false;
+            } else if (ch == '\\') escaped = true;
+            else if (ch == '"') return;
+        }
+        throw new IOException("Unterminated JSON string in dictionary bucket");
+    }
+    private static boolean readBlock(InputStream input, byte[] block) throws IOException {
+        int offset = 0; while (offset < block.length) { int count = input.read(block, offset, block.length - offset); if (count < 0) { if (offset == 0) return false; throw new IOException("Truncated tar header"); } offset += count; } return true;
+    }
+    private static boolean isZeroBlock(byte[] block) { for (byte b : block) if (b != 0) return false; return true; }
+    private static String tarName(byte[] header) {
+        int nameLength = 0; while (nameLength < 100 && header[nameLength] != 0) nameLength++;
+        int prefixLength = 0; while (prefixLength < 155 && header[345 + prefixLength] != 0) prefixLength++;
+        String name = new String(header, 0, nameLength, StandardCharsets.UTF_8);
+        return prefixLength == 0 ? name : new String(header, 345, prefixLength, StandardCharsets.UTF_8) + "/" + name;
+    }
+    private static long parseTarOctal(byte[] header, int offset, int length) throws IOException {
+        int end = offset + length; while (offset < end && header[offset] == ' ') offset++;
+        long value = 0; boolean found = false;
+        while (offset < end && header[offset] >= '0' && header[offset] <= '7') { found = true; int digit = header[offset++] - '0'; if (value > (Long.MAX_VALUE - digit) / 8) throw new IOException("Tar entry size overflows 64-bit integer"); value = (value << 3) + digit; }
+        if (!found) throw new IOException("Invalid octal tar entry size"); return value;
+    }
+    private static void skipFully(InputStream input, long count) throws IOException {
+        while (count > 0) { long skipped = input.skip(count); if (skipped > 0) count -= skipped; else { if (input.read() < 0) throw new IOException("Truncated tar entry"); count--; } }
+    }
+    private static final class BoundedInputStream extends FilterInputStream {
+        private long remaining;
+        private BoundedInputStream(InputStream input, long remaining) { super(input); this.remaining = remaining; }
+        @Override public int read() throws IOException { if (remaining <= 0) return -1; int value = in.read(); if (value >= 0) remaining--; return value; }
+        @Override public int read(byte[] bytes, int offset, int length) throws IOException { if (remaining <= 0) return -1; int count = in.read(bytes, offset, (int) Math.min(length, remaining)); if (count > 0) remaining -= count; return count; }
+        @Override public void close() { /* The tar reader owns the underlying archive stream. */ }
+    }
+
+    private synchronized boolean wasSourceImported(String source) {
+        try (PreparedStatement ps = connection.prepareStatement("SELECT 1 FROM dictionary_sources WHERE source=?")) { ps.setString(1, source); try (ResultSet rs = ps.executeQuery()) { return rs.next(); } }
+        catch (SQLException e) { getLogger().warning("Could not check dictionary source cache: " + e.getMessage()); return false; }
+    }
+    private synchronized void markSourceImported(String source, int added) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement("INSERT INTO dictionary_sources(source,imported_at,entries_added) VALUES(?,?,?) ON CONFLICT(source) DO UPDATE SET imported_at=excluded.imported_at,entries_added=excluded.entries_added")) { ps.setString(1, source); ps.setLong(2, System.currentTimeMillis()); ps.setInt(3, added); ps.executeUpdate(); }
     }
 
     private void scheduleImport(CommandSender sender, boolean reportErrors) {
@@ -223,7 +456,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (sender != null) sender.sendMessage(message("<yellow>Đang tải danh sách từ bất đồng bộ..."));
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             int imported = 0;
-            try { if (!dictionaryReady) loadDictionaryCache(); imported = importSources(sources, timeout, maxLength, reportErrors); }
+            try { if (!dictionaryReady) loadDictionaryCache(); imported = importSources(sources, timeout, maxLength, reportErrors, sender == null); }
             finally {
                 importRunning.set(false); int result = imported;
                 if (sender != null) Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message("<green>Đã nhập " + result + " mục từ.")));
@@ -318,8 +551,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         long delay = Math.max(0, getConfig().getLong("game.next-match-delay-seconds", 5)) * 20L;
         cancelNextMatch(); nextMatchTask=Bukkit.getScheduler().runTaskLater(this, () -> {
             nextMatchTask=null; if(game.isActive())return;
-            if (dictionary.isEmpty()) return;
-            List<String> words = dictionaryIndex; if(words.isEmpty())return; String start = words.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(words.size()));
+            String start = randomStartingWord(); if (start == null) { Bukkit.broadcast(message("<yellow>Chưa tìm được từ mở màn có nước nối hợp lệ.")); return; }
+            rememberStartingWord(start);
             game.start(start); Bukkit.broadcast(message("<green>Ván mới! Từ khóa: <yellow>" + escape(start) + "</yellow>."));
         }, delay);
     }
@@ -343,28 +576,35 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.getScheduler().runTaskLater(this,()->duelInvites.remove(target.getUniqueId(),invite),Math.max(20,getConfig().getLong("duel.invite-expiry-seconds",60))*20L);
     }
     private void acceptDuel(CommandSender sender,String[] args){if(!(sender instanceof Player receiver)){sender.sendMessage("Only players can accept duels.");return;}DuelInvite invite=duelInvites.remove(receiver.getUniqueId());if(invite==null){sender.sendMessage(message("<red>Không có lời mời đấu đang chờ."));return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger==null||!dictionaryReady){sender.sendMessage(message("<red>Người thách đấu đã rời mạng hoặc từ điển chưa sẵn sàng."));return;}if(duels.containsKey(challenger.getUniqueId())||duels.containsKey(receiver.getUniqueId()))return;
-        String start=randomKeyword();if(start==null){sender.sendMessage(message("<red>Từ điển chưa có từ phù hợp."));return;}DuelMatch match=new DuelMatch(challenger.getUniqueId(),challenger.getName(),receiver.getUniqueId(),receiver.getName(),invite.connectSeconds,start);duels.put(challenger.getUniqueId(),match);duels.put(receiver.getUniqueId(),match);
+        String start=randomStartingWord();if(start==null){sender.sendMessage(message("<red>Từ điển chưa có từ mở màn khả dụng."));return;}rememberStartingWord(start);DuelMatch match=new DuelMatch(challenger.getUniqueId(),challenger.getName(),receiver.getUniqueId(),receiver.getName(),invite.connectSeconds,start);duels.put(challenger.getUniqueId(),match);duels.put(receiver.getUniqueId(),match);
         long maxTicks=Math.max(60,Math.min(3600,getConfig().getLong("duel.max-match-seconds",3600)))*20L;match.maxTask=Bukkit.getScheduler().runTaskLater(this,()->finishDuel(match,null,"Trận đấu tự dừng sau một giờ."),maxTicks).getTaskId();armDuelTurn(match);sendDuelMessage(match,"<gold>Đấu bắt đầu! <yellow>"+escape(challenger.getName())+"</yellow> đấu với <yellow>"+escape(receiver.getName())+"</yellow>. Từ khóa: <aqua>"+escape(start)+"</aqua>. Lượt đầu: "+escape(challenger.getName())+".");
     }
     private void denyDuel(CommandSender sender,String[] args){if(!(sender instanceof Player p)){sender.sendMessage("Only players can deny duels.");return;}DuelInvite invite=duelInvites.remove(p.getUniqueId());if(invite==null){sender.sendMessage(message("<red>Không có lời mời đang chờ."));return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger!=null)challenger.sendMessage(message("<yellow>"+escape(p.getName())+" đã từ chối lời mời."));sender.sendMessage(message("<gray>Đã từ chối lời mời."));}
-    private String randomKeyword(){List<String> values=dictionaryIndex;if(values.isEmpty())return null;return values.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(values.size()));}
     private void armDuelTurn(DuelMatch match){if(match.turnSeconds<=0)return;if(match.turnTask!=0)Bukkit.getScheduler().cancelTask(match.turnTask);match.turnTask=Bukkit.getScheduler().runTaskLater(this,()->finishDuel(match,otherPlayer(match,match.turn),"Hết thời gian nối từ."),match.turnSeconds*20L).getTaskId();}
     private UUID otherPlayer(DuelMatch m,UUID id){return m.first.equals(id)?m.second:m.first;}
     private void processDuelMove(DuelMatch m,UUID id,String name,String raw){
         if(!m.active)return;if(!m.turn.equals(id)){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<yellow>Chưa đến lượt bạn nối từ."));return;}
+        if(!hasContinuation(m.last,m.uses,m.hardRun)){resetDuelRound(m);return;}
         String phrase=normalizePhrase(raw);String required=m.last.split(" ")[1];if(!phrase.startsWith(required+" ")){notifyDuelError(id,"<red>Nối chưa đúng; tiếng đầu phải là <yellow>"+escape(required)+"</yellow>.");return;}if(!dictionary.contains(phrase)){notifyDuelError(id,"<red>Từ chưa có trong từ điển; hãy báo bằng /wordchain report "+escape(phrase)+".");return;}
         int limit=Math.max(1,Math.min(5,getConfig().getInt("anti-abuse.word-use-limit",3)));if(m.uses.getOrDefault(phrase,0)>=limit){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<red>Cụm từ này đã đạt giới hạn sử dụng."));return;}
         int difficulty=getConfig().getInt("difficulty.words."+phrase,1),threshold=getConfig().getInt("difficulty.hard-threshold",4),maxHard=Math.max(1,getConfig().getInt("anti-abuse.max-hard-words-in-row",2));if(difficulty>=threshold&&m.hardRun>=maxHard){notifyDuelError(id,"<red>Đã đạt giới hạn cụm khó liên tiếp. Hãy chọn một cụm dễ hơn.");return;}m.hardRun=difficulty>=threshold?m.hardRun+1:0;
         m.uses.merge(phrase,1,Integer::sum);m.last=phrase;m.moves++;m.turn=otherPlayer(m,id);armDuelTurn(m);sendDuelMessage(m,"<aqua>[ĐẤU]</aqua> <yellow>"+escape(name)+"</yellow>: <white>"+escape(phrase)+"</white>. Từ cần nối: <gold>"+escape(phrase.split(" ")[1])+"</gold>.");
         Bukkit.getPluginManager().callEvent(new WordChainMoveEvent(id,name,phrase));
         if(m.moves>=getConfig().getInt("duel.target-moves",10))finishDuel(m,id,"Đấu kết thúc!");
+        else if(!hasContinuation(m.last,m.uses,m.hardRun))resetDuelRound(m);
+    }
+    private void resetDuelRound(DuelMatch match) {
+        String next = randomStartingWord();
+        if (next == null) { finishDuel(match, null, "Không còn từ mở màn có nước nối."); return; }
+        rememberStartingWord(next); match.last=next; match.turn=match.first; match.uses.clear(); match.uses.put(next,1); match.hardRun=initialHardRun(next); match.moves=0; armDuelTurn(match);
+        sendDuelMessage(match,"<yellow>Không còn nước nối hợp lệ; ván duel được đặt lại với từ khóa ngẫu nhiên <gold>"+escape(next)+"</gold>. Lượt đầu: "+escape(match.firstName)+".");
     }
     private void finishDuel(DuelMatch m,UUID winner,String reason){if(!m.active)return;m.active=false;duels.remove(m.first,m);duels.remove(m.second,m);if(m.turnTask!=0)Bukkit.getScheduler().cancelTask(m.turnTask);if(m.maxTask!=0)Bukkit.getScheduler().cancelTask(m.maxTask);if(winner==null){sendDuelMessage(m,"<yellow>"+reason+" Không có người thắng.");return;}String name=m.first.equals(winner)?m.firstName:m.secondName;sendDuelMessage(m,"<gold>"+reason+" Người thắng: <yellow>"+escape(name)+"</yellow>!");saveWin(winner,name,true,true,otherPlayer(m,winner));}
     private void sendDuelMessage(DuelMatch match,String text){Component component=message(text);Player first=Bukkit.getPlayer(match.first),second=Bukkit.getPlayer(match.second);if(first!=null)first.sendMessage(component);if(second!=null)second.sendMessage(component);}
     private void notifyDuelError(UUID id,String text){long now=System.currentTimeMillis(),last=wrongMoveNotice.getOrDefault(id,0L);if(now-last<1500)return;wrongMoveNotice.put(id,now);Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message(text));}
 
     private record DuelInvite(UUID challenger,String challengerName,UUID target,int connectSeconds){}
-    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final Map<String,Integer> uses=new HashMap<>();String last;UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;last=start;turn=a;uses.put(start,1);}}
+    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final Map<String,Integer> uses=new HashMap<>();String last;UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
     private void showTop(CommandSender sender) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             List<String> rows = new ArrayList<>(); synchronized (this) {
@@ -390,7 +630,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void openMenu(Player p) {
         boolean admin = p.hasPermission("wordchain.admin")||p.hasPermission("wordchain.rewards")||p.hasPermission("wordchain.stats"); MenuHolder holder = new MenuHolder(MenuMode.MAIN);
         Inventory inv = Bukkit.createInventory(holder, admin ? 45 : 27, message(getConfig().getString("menu.title", "<dark_green>Nối Từ</dark_green>"))); holder.inventory = inv;
-        put(inv, 10, Material.LIME_WOOL, "<green><bold>Bắt đầu ván</bold>", "<gray>Bắt đầu từ: " + escape(getConfig().getString("game.starting-word", "phong cảnh")));
+        put(inv, 10, Material.LIME_WOOL, "<green><bold>Bắt đầu ván</bold>", "<gray>Từ mở màn được chọn ngẫu nhiên, tránh lặp gần đây");
         put(inv, 12, Material.BARRIER, "<red>Dừng ván", "<gray>Dừng trò chơi hiện tại");
         put(inv, 14, Material.SUNFLOWER, "<yellow>Đặt lại", "<gray>Xóa trạng thái ván hiện tại");
         put(inv, 16, Material.GOLD_INGOT, "<gold>Bảng xếp hạng", "<gray>Xem 10 người thắng nhiều nhất");
@@ -480,13 +720,14 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private final class WordGame {
         private String lastWord = ""; private int moves; private boolean active;
         private final Map<String,Integer> used = new HashMap<>(); private int hardRun;
-        synchronized void start(String phrase) { used.clear(); lastWord = phrase; used.put(phrase,1); hardRun = 0; moves = 0; active = true; }
+        synchronized void start(String phrase) { used.clear(); lastWord = phrase; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; active = true; }
         synchronized void reset() { used.clear(); lastWord = ""; moves = 0; active = false; }
         synchronized void stop() { active = false; }
         synchronized boolean isActive() { return active; }
         synchronized int getMoves() { return moves; }
         synchronized String getLastWord() { return lastWord; }
         synchronized String requiredSyllable() { String[] parts = lastWord.split(" "); return parts[parts.length - 1]; }
+        synchronized boolean hasLegalContinuation() { return active && hasContinuation(lastWord, used, hardRun); }
         synchronized boolean tryMove(String input, java.util.function.Predicate<String> dictionary) {
             if (!active) return false; String phrase = normalizePhrase(input); String[] parts = phrase.split(" ");
             if (parts.length != 2 || !parts[0].equals(requiredSyllable()) || !dictionary.test(phrase)) return false;

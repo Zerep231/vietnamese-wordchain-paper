@@ -1,10 +1,10 @@
 game:
   target-moves: 10
-  starting-word: "phong cảnh"
   # Players can use start/stop/reset by default; set false to restrict controls to admins.
   members-can-control: true
   max-phrase-length: 48
   next-match-delay-seconds: 5
+  recent-start-limit: 20
 rewards:
   # Bukkit material names and positive integer amounts. Invalid entries are skipped with a warning.
   items:
@@ -12,10 +12,12 @@ rewards:
     - "EMERALD:5"
 dictionary:
   # Sources may be plain|URL (one phrase per line), tab|URL (entry in column one),
-  # or kaikki|URL (Kaikki/Wiktionary JSONL; .gz URLs are decompressed while streaming).
+  # kaikki|URL (Kaikki/Wiktionary JSONL), or tu-dien-archive|URL (release tar.gz).
+  # The 124 MB archive is streamed without saving it to disk; successful sources are cached in SQLite.
   # Only Vietnamese entries that are exactly two syllables are indexed.
   sources:
     - "plain|https://raw.githubusercontent.com/duyet/vietnamese-wordlist/master/Viet39K.txt"
+    - "tu-dien-archive|https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/download/v0.4.0-beta/tu-dien-tieng-viet-0.4.0-beta-documented.tar.gz"
     # Enable on demand if desired; the compressed Wiktionary extract is about 33 MB.
     # - "kaikki|https://kaikki.org/viwiktionary/raw-wiktextract-data.jsonl.gz"
   refresh-on-start: true
