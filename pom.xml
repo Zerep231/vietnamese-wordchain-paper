@@ -9,6 +9,12 @@
   </dependencies>
   <build><plugins>
     <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.1</version><configuration><release>25</release></configuration></plugin>
-    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.6.0</version><executions><execution><phase>package</phase><goals><goal>shade</goal></goals><configuration><createDependencyReducedPom>false</createDependencyReducedPom><relocations><relocation><pattern>org.sqlite</pattern><shadedPattern>com.example.wordchain.libs.sqlite</shadedPattern></relocation></relocations></configuration></execution></executions></plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.5.1</version><configuration><includes><include>**/*.class</include><include>**/*.yml</include><include>**/*.properties</include></includes></configuration></plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.6.2</version><executions><execution><phase>package</phase><goals><goal>shade</goal></goals><configuration><createDependencyReducedPom>false</createDependencyReducedPom><filters><filter><artifact>org.xerial:sqlite-jdbc</artifact><excludes>
+      <exclude>org/sqlite/native/Linux-Android/**</exclude><exclude>org/sqlite/native/FreeBSD/**</exclude>
+      <exclude>org/sqlite/native/Linux/arm/**</exclude><exclude>org/sqlite/native/Linux/armv6/**</exclude><exclude>org/sqlite/native/Linux/armv7/**</exclude><exclude>org/sqlite/native/Linux/ppc64/**</exclude><exclude>org/sqlite/native/Linux/riscv64/**</exclude><exclude>org/sqlite/native/Linux/x86/**</exclude>
+      <exclude>org/sqlite/native/Linux-Musl/x86/**</exclude>
+      <exclude>org/sqlite/native/Windows/aarch64/**</exclude><exclude>org/sqlite/native/Windows/armv7/**</exclude><exclude>org/sqlite/native/Windows/x86/**</exclude>
+    </excludes></filter></filters><relocations><relocation><pattern>org.sqlite</pattern><shadedPattern>com.example.wordchain.libs.sqlite</shadedPattern></relocation></relocations></configuration></execution></executions></plugin>
   </plugins></build>
 </project>

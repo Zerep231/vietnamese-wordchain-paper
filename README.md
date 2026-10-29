@@ -6,7 +6,7 @@ A Vietnamese word-chain minigame for Paper 26.2+ and Java 25. The plugin imports
 
 ## Build and install
 
-Run `mvn package` with Java 25. Copy `target/word-chain-1.1.0.jar` into the server's `plugins` folder and restart. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`.
+Run `mvn package` with Java 25. Copy `target/word-chain-1.1.0.jar` into the server's `plugins` folder and restart. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`. The bundled SQLite driver supports Linux x86_64/aarch64 (glibc and musl), Windows x86_64, and macOS x86_64/aarch64 servers.
 
 ## Commands and permissions
 
@@ -51,7 +51,7 @@ Set `game.members-can-control: false` to restrict start/stop/reset to `wordchain
 
 The admin menu includes reward editing and a wins/streak browser. `wordchain.rewards` and `wordchain.stats` are separate operator permissions; `wordchain.admin` grants both. Other plugins can obtain the `com.example.wordchain.api.WordChainApi` service and listen for `WordChainMoveEvent` and `WordChainWinEvent`; database-backed API reads return a `CompletionStage`.
 
-Streaks count consecutive match winners server-wide: a win advances that player's streak and resets other players' current streaks. Duel and public-game wins both count. Phrase difficulty defaults to level 1; admins can tag a phrase from 1 to 5, and the game limits consecutive phrases at or above `difficulty.hard-threshold`. Invalid two-syllable moves receive a private hint with a short per-player cooldown; longer chat messages are ignored.
+Public-game streaks count consecutive server-wide match winners. Duel wins advance the winner's streak and reset only the opponent's streak. Phrase difficulty defaults to level 1; admins can tag a phrase from 1 to 5, and the game limits consecutive phrases at or above `difficulty.hard-threshold`. Invalid two-syllable moves receive a private hint with a short per-player cooldown; longer chat messages are ignored.
 
 The default source is the Viet39K phrase list from [duyet/vietnamese-wordlist](https://github.com/duyet/vietnamese-wordlist). Its README identifies the list as GPL-licensed; the plugin downloads it at runtime rather than bundling the word data. Check source licenses and attribution requirements before adding other lists or redistributing imported data.
 

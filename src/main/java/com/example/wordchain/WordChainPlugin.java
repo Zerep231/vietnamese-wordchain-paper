@@ -51,7 +51,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private volatile List<String> dictionaryIndex = List.of();
     private volatile boolean dictionaryReady;
     private WordChainApi api;
-    private int nextMatchTask;
+    private org.bukkit.scheduler.BukkitTask nextMatchTask;
     private Connection connection;
     private WordGame game;
 
@@ -89,7 +89,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     @Override public void onDisable() {
         if (api != null) getServer().getServicesManager().unregister(WordChainApi.class, api);
-        try { if (connection != null && !connection.isClosed()) connection.close(); } catch (SQLException e) { getLogger().warning(e.getMessage()); }
+        cancelNextMatch();
+        synchronized (this) {
+            try { if (connection != null && !connection.isClosed()) connection.close(); } catch (SQLException e) { getLogger().warning(e.getMessage()); }
+        }
     }
 
     // Async chat is handed to the main thread before touching game state or Bukkit player state.
@@ -99,6 +102,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (duel != null) {
             event.setCancelled(true); // Duel chat is private; never publish duel messages to the server chat.
             if (isTwoSyllablePhrase(input)) Bukkit.getScheduler().runTask(this, () -> processMove(id, name, input));
+            else Bukkit.getScheduler().runTask(this, () -> notifyDuelError(id, "<red>Trong duel, hãy gửi đúng một cụm gồm hai tiếng."));
             return;
         }
         // Ignore ordinary conversation and long messages before scheduling any main-thread work.
@@ -127,6 +131,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             case "start" -> {
                 if (!canControl(sender)) return deny(sender);
                 if (!dictionaryReady || importRunning.get()) { sender.sendMessage(message("<yellow>Đang nạp từ điển, vui lòng thử lại sau.")); return true; }
+                if (game.isActive()) { sender.sendMessage(message("<yellow>Ván đang diễn ra. Dùng /wordchain reset để bắt đầu lại.")); return true; }
                 String start = args.length > 1 ? normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))) : normalizePhrase(getConfig().getString("game.starting-word", "phong cảnh"));
                 if (!isTwoSyllablePhrase(start) || !isValidWord(start)) { sender.sendMessage(message("<red>Từ bắt đầu phải là cụm đúng hai tiếng có trong từ điển.")); return true; }
                 cancelNextMatch(); game.start(start); Bukkit.broadcast(message("<green>Trò Nối Từ bắt đầu! Từ đầu tiên: <yellow>" + escape(start) + "</yellow>."));
@@ -288,7 +293,11 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> { int streak = 1; synchronized (this) {
             try {
                 connection.setAutoCommit(false);
-                if (resetOtherStreaks) try (PreparedStatement reset = connection.prepareStatement("UPDATE wins SET current_streak=0 WHERE uuid<>?")) { reset.setString(1, id.toString()); reset.executeUpdate(); }
+                if (duel && duelOpponent != null) {
+                    try (PreparedStatement reset = connection.prepareStatement("UPDATE wins SET current_streak=0 WHERE uuid=?")) { reset.setString(1, duelOpponent.toString()); reset.executeUpdate(); }
+                } else if (resetOtherStreaks) {
+                    try (PreparedStatement reset = connection.prepareStatement("UPDATE wins SET current_streak=0 WHERE uuid<>?")) { reset.setString(1, id.toString()); reset.executeUpdate(); }
+                }
                 try (PreparedStatement ps = connection.prepareStatement("INSERT INTO wins(uuid,player_name,wins,current_streak,best_streak) VALUES(?,?,1,1,1) ON CONFLICT(uuid) DO UPDATE SET player_name=excluded.player_name,wins=wins+1,current_streak=current_streak+1,best_streak=MAX(best_streak,current_streak+1)")) { ps.setString(1, id.toString()); ps.setString(2, name); ps.executeUpdate(); }
                 try (PreparedStatement ps = connection.prepareStatement("SELECT current_streak FROM wins WHERE uuid=?")) { ps.setString(1, id.toString()); try (ResultSet rs = ps.executeQuery()) { if (rs.next()) streak = rs.getInt(1); } }
                 connection.commit();
@@ -308,13 +317,13 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void startNextMatch() {
         long delay = Math.max(0, getConfig().getLong("game.next-match-delay-seconds", 5)) * 20L;
         cancelNextMatch(); nextMatchTask=Bukkit.getScheduler().runTaskLater(this, () -> {
-            nextMatchTask=0; if(game.isActive())return;
+            nextMatchTask=null; if(game.isActive())return;
             if (dictionary.isEmpty()) return;
             List<String> words = dictionaryIndex; if(words.isEmpty())return; String start = words.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(words.size()));
             game.start(start); Bukkit.broadcast(message("<green>Ván mới! Từ khóa: <yellow>" + escape(start) + "</yellow>."));
         }, delay);
     }
-    private void cancelNextMatch(){if(nextMatchTask!=0){Bukkit.getScheduler().cancelTask(nextMatchTask);nextMatchTask=0;}}
+    private void cancelNextMatch(){if(nextMatchTask!=null){nextMatchTask.cancel();nextMatchTask=null;}}
 
     private void setDifficulty(CommandSender sender, String[] args) {
         if(args.length!=4){sender.sendMessage(message("<yellow>Dùng: /wordchain difficulty <tiếng1> <tiếng2> <1-5>"));return;}
@@ -489,5 +498,5 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             used.merge(phrase,1,Integer::sum); lastWord = phrase; moves++; return true;
         }
     }
-    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,null,"Người chơi rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
 }
