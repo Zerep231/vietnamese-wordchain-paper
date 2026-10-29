@@ -1,0 +1,42 @@
+game:
+  target-moves: 10
+  starting-word: "phong cảnh"
+  # Players can use start/stop/reset by default; set false to restrict controls to admins.
+  members-can-control: true
+  max-phrase-length: 48
+  next-match-delay-seconds: 5
+rewards:
+  # Bukkit material names and positive integer amounts. Invalid entries are skipped with a warning.
+  items:
+    - "DIAMOND:3"
+    - "EMERALD:5"
+dictionary:
+  # Sources may be plain|URL (one phrase per line), tab|URL (entry in column one),
+  # or kaikki|URL (Kaikki/Wiktionary JSONL; .gz URLs are decompressed while streaming).
+  # Only Vietnamese entries that are exactly two syllables are indexed.
+  sources:
+    - "plain|https://raw.githubusercontent.com/duyet/vietnamese-wordlist/master/Viet39K.txt"
+    # Enable on demand if desired; the compressed Wiktionary extract is about 33 MB.
+    # - "kaikki|https://kaikki.org/viwiktionary/raw-wiktextract-data.jsonl.gz"
+  refresh-on-start: true
+  request-timeout-seconds: 20
+reports:
+  cooldown-seconds: 30
+menu:
+  title: "<dark_green><bold>Nối Từ</bold></dark_green> <gray>• Menu</gray>"
+streak-rewards:
+  # multiplier = min(max-multiplier, 1 + bonus-per-level * log2(streak))
+  bonus-per-level: 0.35
+  max-multiplier: 3.0
+  max-items-per-type: 64
+anti-abuse:
+  word-use-limit: 3
+  max-hard-words-in-row: 2
+difficulty:
+  hard-threshold: 4
+  words: {}
+duel:
+  target-moves: 10
+  default-connect-seconds: 30
+  invite-expiry-seconds: 60
+  max-match-seconds: 3600

@@ -1,0 +1,23 @@
+name: WordChain
+version: 1.1.0
+main: com.example.wordchain.WordChainPlugin
+api-version: '26.2'
+description: Vietnamese word-chain game with public chat rounds, private duels, rewards, and leaderboard.
+commands:
+  wordchain:
+    description: Word-chain game controls and menu
+    usage: /wordchain <start|stop|reset|menu|top|wins|rewards|reward|difficulty|duel|accept|deny|add|remove|report|reports|approve|reject|import|reload>
+    aliases: [wc, noitu]
+permissions:
+  wordchain.play:
+    description: Start, stop, and reset the word-chain game
+    default: true
+  wordchain.admin:
+    description: Manage words, reports, dictionary imports, and configuration
+    default: op
+  wordchain.rewards:
+    description: Edit reward item types and amounts
+    default: op
+  wordchain.stats:
+    description: View player win and streak statistics
+    default: op

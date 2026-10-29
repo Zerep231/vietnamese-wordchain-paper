@@ -1,0 +1,16 @@
+# Maven output
+/target/
+
+# Local development and workspace metadata
+/.idea/
+/.vscode/
+/.agents/
+
+# Server/runtime data
+*.db
+*.db-shm
+*.db-wal
+*.log
+/plugins/
+/server.jar
+/eula.txt
