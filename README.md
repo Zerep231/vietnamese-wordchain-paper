@@ -6,7 +6,7 @@ A Vietnamese word-chain minigame for Paper 26.2+ and Java 25. It imports UTF-8 w
 
 ## Build and install
 
-Run `mvn package` with Java 25. Copy `target/word-chain-1.2.1.jar` into the server's `plugins` folder and restart. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`. The bundled SQLite driver supports Linux x86_64/aarch64 (glibc and musl), Windows x86_64, and macOS x86_64/aarch64 servers.
+Run `mvn verify` with Java 25. Copy `target/word-chain-1.3.0.jar` into the server's `plugins` folder and restart. Paper downloads SQLite JDBC as a declared library on first startup. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`.
 
 ## Commands and permissions
 
@@ -15,7 +15,8 @@ Run `mvn package` with Java 25. Copy `target/word-chain-1.2.1.jar` into the serv
 | `/wordchain` or `/wc` | Open the game menu | Any player |
 | `/wordchain start [two-word phrase]` | Start with a random viable phrase, or the specified phrase | `wordchain.play` (default: everyone) |
 | `/wordchain stop` | Stop the current game | `wordchain.play` |
-| `/wordchain reset` | Clear current game state | `wordchain.play` |
+| `/wordchain reset` | Propose starting a fresh public game with a random keyword | `wordchain.play` |
+| `/wordchain vote <yes|no>` | Vote on a public request to start a fresh game | `wordchain.vote` |
 | `/wordchain top` | Show the persistent top ten | Any player |
 | `/wordchain wins <player>` | Show wins, current streak, and best streak | `wordchain.stats` |
 | `/wordchain rewards` | Open reward editor | `wordchain.rewards` |
@@ -43,12 +44,15 @@ Basic player permissions are available to everyone by default. To assign them ex
 /lp group default permission set wordchain.player true
 ```
 
-`wordchain.player` includes `wordchain.play`, `wordchain.menu`, `wordchain.top`, `wordchain.duel`, `wordchain.duel.respond`, and `wordchain.report`. Remove a specific permission from the default group to restrict that command, for example `/lp group default permission set wordchain.duel false`. Admin permissions remain separate: `wordchain.admin`, `wordchain.rewards`, and `wordchain.stats`.
+`wordchain.player` includes `wordchain.play`, `wordchain.menu`, `wordchain.top`, `wordchain.duel`, `wordchain.duel.respond`, `wordchain.report`, and `wordchain.vote`. Remove a specific permission from the default group to restrict that command, for example `/lp group default permission set wordchain.duel false`. Admin permissions remain separate: `wordchain.admin`, `wordchain.rewards`, and `wordchain.stats`.
+
+`/wordchain reset` asks the other online players to approve a fresh public round. At least one third of the online players at proposal time (rounded up) must vote yes; the proposer cannot vote. A matching one-third no vote rejects the proposal. Votes expire after `game.reset-vote-seconds` (default 30). Players in a duel have their exact two-syllable turns delivered privately to both duelists; duel chat is cancelled from global chat.
 
 ## Configuration
 
 - `game.target-moves`: valid linked phrases needed to win.
 - `game.recent-start-limit`: number of recent random start phrases to avoid repeating.
+- `game.reset-vote-seconds`: how long a public reset vote stays open (5–120 seconds).
 - `rewards.items`: list of `MATERIAL:amount` rewards, for example `DIAMOND:3`.
 - `dictionary.sources`: source entries use `plain|URL`, `tab|URL`, `kaikki|URL`, or `tu-dien-archive|URL`. The NhanAZ release archive streams through the importer; only `data/processed/words/*.json` is parsed and only exactly two-syllable headwords are indexed. The 124 MB archive is not stored on disk.
 - `dictionary.refresh-on-start`: check configured sources asynchronously on startup. Imported source URLs are recorded in SQLite and skipped on later starts; `/wordchain import` forces a refresh.

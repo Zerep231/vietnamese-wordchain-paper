@@ -55,6 +55,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private volatile boolean dictionaryReady;
     private WordChainApi api;
     private org.bukkit.scheduler.BukkitTask nextMatchTask;
+    private org.bukkit.scheduler.BukkitTask resetVoteTask;
+    private ResetVote resetVote;
     private Connection connection;
     private WordGame game;
 
@@ -62,8 +64,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         saveDefaultConfig();
         migrateConfigDefaults();
         try {
-            Class.forName("org.sqlite.JDBC");
-            connection = DriverManager.getConnection("jdbc:sqlite:" + getDataFolder().toPath().resolve("wordchain.db"));
+            connection = new org.sqlite.JDBC().connect("jdbc:sqlite:" + getDataFolder().toPath().resolve("wordchain.db"), new Properties());
+            if (connection == null) throw new SQLException("SQLite JDBC driver rejected the database URL");
             try (Statement s = connection.createStatement()) {
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS words (phrase TEXT PRIMARY KEY, first_syllable TEXT NOT NULL, last_syllable TEXT NOT NULL)");
                 s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_words_first ON words(first_syllable)");
@@ -97,6 +99,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         List<String> sources = new ArrayList<>(getConfig().getStringList("dictionary.sources"));
         if (!sources.contains(TUDIEN_ARCHIVE_SOURCE)) { sources.add(TUDIEN_ARCHIVE_SOURCE); getConfig().set("dictionary.sources", sources); changed = true; }
         if (!getConfig().contains("game.recent-start-limit")) { getConfig().set("game.recent-start-limit", 20); changed = true; }
+        if (!getConfig().contains("game.reset-vote-seconds")) { getConfig().set("game.reset-vote-seconds", 30); changed = true; }
         if (changed) saveConfig();
     }
 
@@ -156,11 +159,13 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 if (game.isActive()) { sender.sendMessage(message("<yellow>Ván đang diễn ra. Dùng /wordchain reset để bắt đầu lại.")); return true; }
                 String start = args.length > 1 ? normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))) : randomStartingWord();
                 if (start == null || !isTwoSyllablePhrase(start) || !isValidWord(start) || !hasContinuation(start, Map.of(start, 1), initialHardRun(start))) { sender.sendMessage(message("<red>Không có từ mở màn phù hợp. Hãy nạp thêm dữ liệu từ điển.")); return true; }
+                cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì ván mới được bắt đầu.");
                 rememberStartingWord(start);
                 cancelNextMatch(); game.start(start); Bukkit.broadcast(message("<green>Trò Nối Từ bắt đầu! Từ đầu tiên: <yellow>" + escape(start) + "</yellow>."));
             }
-            case "stop" -> { if (!canControl(sender)) return deny(sender); cancelNextMatch(); game.stop(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
-            case "reset" -> { if (!canControl(sender)) return deny(sender); cancelNextMatch(); game.reset(); Bukkit.broadcast(message("<yellow>Ván Nối Từ đã được đặt lại.")); }
+            case "stop" -> { if (!canControl(sender)) return deny(sender); cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì trò chơi đã dừng."); cancelNextMatch(); game.stop(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
+            case "reset" -> { if (!canControl(sender)) return deny(sender); if (!dictionaryReady || importRunning.get()) { sender.sendMessage(message("<yellow>Đang nạp từ điển, vui lòng thử lại sau.")); return true; } requestPublicReset(sender); }
+            case "vote" -> { if (!sender.hasPermission("wordchain.vote")) return deny(sender); castResetVote(sender, args); }
             case "menu" -> { if (!sender.hasPermission("wordchain.menu")) return deny(sender); if (sender instanceof Player p) openMenu(p); else sender.sendMessage("Lệnh này chỉ dành cho người chơi."); }
             case "top" -> { if (!sender.hasPermission("wordchain.top")) return deny(sender); showTop(sender); }
             case "wins" -> { if (!(sender.hasPermission("wordchain.admin") || sender.hasPermission("wordchain.stats"))) return deny(sender); if (args.length != 2) { sender.sendMessage(message("<yellow>Dùng: /wordchain wins <player>")); return true; } showPlayerStats(sender, args[1]); }
@@ -632,7 +637,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Inventory inv = Bukkit.createInventory(holder, admin ? 45 : 27, message(getConfig().getString("menu.title", "<dark_green>Nối Từ</dark_green>"))); holder.inventory = inv;
         put(inv, 10, Material.LIME_WOOL, "<green><bold>Bắt đầu ván</bold>", "<gray>Từ mở màn được chọn ngẫu nhiên, tránh lặp gần đây");
         put(inv, 12, Material.BARRIER, "<red>Dừng ván", "<gray>Dừng trò chơi hiện tại");
-        put(inv, 14, Material.SUNFLOWER, "<yellow>Đặt lại", "<gray>Xóa trạng thái ván hiện tại");
+        put(inv, 14, Material.SUNFLOWER, "<yellow>Đề xuất ván mới", "<gray>Người chơi khác bỏ phiếu; cần ít nhất 1/3 đồng ý");
         put(inv, 16, Material.GOLD_INGOT, "<gold>Bảng xếp hạng", "<gray>Xem 10 người thắng nhiều nhất");
         put(inv, 22, Material.BOOK, "<aqua>Thông tin", "<gray>Từ trong dữ liệu: " + countWords(), "<gray>Mục tiêu: " + getConfig().getInt("game.target-moves", 10) + " lượt");
         if (admin) { put(inv, 29, Material.HOPPER, "<gold>Nhập từ điển", "<gray>Tải các nguồn đã cấu hình"); put(inv, 31, Material.WRITABLE_BOOK, "<aqua>Báo cáo từ", "<gray>Xem các từ người chơi báo"); put(inv, 33, Material.COMPARATOR, "<yellow>Tải lại cấu hình", "<gray>Đọc lại config.yml"); put(inv, 37, Material.DIAMOND, "<gold>Chỉnh phần thưởng", "<gray>Điều chỉnh cấu hình quà thắng"); put(inv, 41, Material.PLAYER_HEAD, "<aqua>Thống kê người chơi", "<gray>Xem thắng và chuỗi thắng"); }
@@ -713,8 +718,78 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> { boolean removed = false; synchronized (this) { try (PreparedStatement ps = connection.prepareStatement("DELETE FROM words WHERE phrase=?")) { ps.setString(1, phrase); removed = ps.executeUpdate() > 0; } catch (SQLException ex) { getLogger().warning(ex.getMessage()); } } if (removed) { dictionary.remove(phrase); refreshWordIndex(); } boolean result = removed; Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message(result ? "<green>Đã xóa: " + escape(phrase) : "<red>Không tìm thấy từ."))); });
     }
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (args.length == 1) return List.of("start", "stop", "reset", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 1) return List.of("start", "stop", "reset", "vote", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 2 && args[0].equalsIgnoreCase("vote")) return List.of("yes", "no").stream().filter(s -> s.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         return List.of();
+    }
+
+    private void requestPublicReset(CommandSender sender) {
+        if (!(sender instanceof Player player)) {
+            startFreshPublicGame(sender.getName());
+            return;
+        }
+        if (resetVote != null) {
+            player.sendMessage(message("<yellow>Đang có đề xuất đặt lại từ " + escape(resetVote.requesterName()) + "."));
+            return;
+        }
+        Set<UUID> online = new HashSet<>();
+        Bukkit.getOnlinePlayers().forEach(onlinePlayer -> online.add(onlinePlayer.getUniqueId()));
+        if (online.size() < 2) {
+            player.sendMessage(message("<red>Cần ít nhất hai người chơi online để bỏ phiếu đặt lại."));
+            return;
+        }
+        resetVote = new ResetVote(player.getUniqueId(), player.getName(), online);
+        int timeout = Math.max(5, Math.min(120, getConfig().getInt("game.reset-vote-seconds", 30)));
+        ResetVote proposal = resetVote;
+        resetVoteTask = Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (resetVote != proposal) return;
+            clearResetVote();
+            Bukkit.broadcast(message("<yellow>Đề xuất đặt lại của " + escape(proposal.requesterName()) + " đã hết hạn vì chưa đủ phiếu."));
+        }, timeout * 20L);
+        Bukkit.broadcast(message("<gold>" + escape(player.getName()) + " đề xuất bắt đầu ván mới với từ khóa ngẫu nhiên. Người chơi khác dùng <yellow>/wordchain vote yes</yellow> hoặc <yellow>/wordchain vote no</yellow>. Cần " + proposal.requiredVotes() + " phiếu (ít nhất 1/3 người chơi đang online) trong " + timeout + " giây."));
+    }
+
+    private void castResetVote(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player)) { sender.sendMessage(message("<red>Chỉ người chơi mới bỏ phiếu được.")); return; }
+        if (args.length != 2 || !(args[1].equalsIgnoreCase("yes") || args[1].equalsIgnoreCase("no"))) { sender.sendMessage(message("<yellow>Dùng: /wordchain vote <yes|no>")); return; }
+        ResetVote proposal = resetVote;
+        if (proposal == null) { player.sendMessage(message("<yellow>Hiện không có đề xuất đặt lại nào.")); return; }
+        ResetVote.Result result = proposal.cast(player.getUniqueId(), args[1].equalsIgnoreCase("yes"));
+        switch (result) {
+            case INELIGIBLE -> player.sendMessage(message("<red>Người đề xuất không thể tự bỏ phiếu; chỉ người chơi đang online lúc mở phiếu được bỏ phiếu."));
+            case DUPLICATE -> player.sendMessage(message("<yellow>Bạn đã bỏ phiếu rồi."));
+            case RECORDED -> Bukkit.broadcast(message("<gray>Phiếu đặt lại: <green>" + proposal.yesVotes() + " đồng ý</green>, <red>" + proposal.noVotes() + " từ chối</red>; cần " + proposal.requiredVotes() + "."));
+            case ACCEPTED -> {
+                clearResetVote();
+                Bukkit.broadcast(message("<green>Đề xuất bắt đầu ván mới đã được thông qua."));
+                startFreshPublicGame(proposal.requesterName());
+            }
+            case REJECTED -> {
+                clearResetVote();
+                Bukkit.broadcast(message("<yellow>Đề xuất bắt đầu ván mới đã bị từ chối."));
+            }
+        }
+    }
+
+    private void startFreshPublicGame(String requesterName) {
+        String start = randomStartingWord();
+        if (start == null) { Bukkit.broadcast(message("<red>Không thể đặt lại ván: từ điển chưa có từ mở màn hợp lệ.")); return; }
+        cancelNextMatch();
+        rememberStartingWord(start);
+        game.start(start);
+        Bukkit.broadcast(message("<green>Ván mới được " + escape(requesterName) + " yêu cầu bắt đầu! Từ khóa ngẫu nhiên: <yellow>" + escape(start) + "</yellow>."));
+    }
+
+    private void clearResetVote() {
+        if (resetVoteTask != null) resetVoteTask.cancel();
+        resetVoteTask = null;
+        resetVote = null;
+    }
+
+    private void cancelResetVote(String reason) {
+        if (resetVote == null) return;
+        clearResetVote();
+        Bukkit.broadcast(message(reason));
     }
 
     private final class WordGame {
@@ -739,5 +814,5 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             used.merge(phrase,1,Integer::sum); lastWord = phrase; moves++; return true;
         }
     }
-    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();if(resetVote!=null&&resetVote.requester().equals(id))cancelResetVote("<yellow>Đề xuất ván mới bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
 }

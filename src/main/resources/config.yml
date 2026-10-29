@@ -5,6 +5,7 @@ game:
   max-phrase-length: 48
   next-match-delay-seconds: 5
   recent-start-limit: 20
+  reset-vote-seconds: 30
 rewards:
   # Bukkit material names and positive integer amounts. Invalid entries are skipped with a warning.
   items:

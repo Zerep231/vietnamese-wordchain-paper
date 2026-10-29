@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+- Changed player reset into a public vote for a fresh random round; one-third of online players must accept, one-third rejecting declines, and proposals expire.
+- Kept duel phrase turns private to both duelists and prevented duel chat from being broadcast to the world.
+- Removed bundled/shaded SQLite JDBC from the plugin JAR; Paper resolves it through the `libraries` plugin.yml field.
+- Added automated unit tests for reset vote quorum and eligibility.
+
 ## 1.2.1
 - Added a `wordchain.player` permission group for LuckPerms and separate permission nodes for the basic menu, leaderboard, duel, duel responses, and word reports.
 - Documented the LuckPerms command to grant the basic player permissions to its default group.
