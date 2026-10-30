@@ -3,8 +3,6 @@ package com.example.wordchain;
 import java.io.IOException;
 import java.io.PushbackReader;
 import java.io.Reader;
-import java.text.Normalizer;
-import java.util.Locale;
 import java.util.function.Consumer;
 
 /** Streaming importer for JSON arrays containing objects with a phrase field. */
@@ -50,7 +48,7 @@ final class JsonPhraseArrayImporter {
     }
 
     private static String normalize(String value) {
-        return Normalizer.normalize(value.trim().toLowerCase(Locale.forLanguageTag("vi-VN")).replaceAll("\\s+", " "), Normalizer.Form.NFC);
+        return VietnameseNormalizer.normalize(value);
     }
 
     private static char next(PushbackReader reader) throws IOException {

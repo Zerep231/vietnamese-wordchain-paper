@@ -16,15 +16,17 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.sql.*;
 import java.io.*;
-import java.net.URL;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.regex.Matcher;
@@ -41,33 +43,40 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private static final MiniMessage MM = MiniMessage.miniMessage();
     private static final String TUDIEN_ARCHIVE_SOURCE = "tu-dien-archive|https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/download/v0.4.0-beta/tu-dien-tieng-viet-0.4.0-beta-documented.tar.gz";
     private static final String MEGUMI_JSON_SOURCE = "json-array|https://raw.githubusercontent.com/MegumiKatou02/Vietnamese-dictionary-api/main/vietnamese_words.json";
-    private final Map<UUID, Long> reportCooldown = new HashMap<>();
-    private final Map<UUID, Long> wrongMoveNotice = new HashMap<>();
+    private final Map<UUID, Long> reportCooldown = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> wrongMoveNotice = new ConcurrentHashMap<>();
     private final Map<UUID,DuelInvite> duelInvites = new ConcurrentHashMap<>();
     private final Map<UUID,DuelMatch> duels = new ConcurrentHashMap<>();
-    private final LinkedHashSet<String> recentStartingWords = new LinkedHashSet<>();
+    private final Set<String> recentStartingWords = Collections.synchronizedSet(new LinkedHashSet<>());
     private final AtomicBoolean importRunning = new AtomicBoolean();
     private final Object configWriteLock = new Object();
-    private long configRevision;
+    private volatile long configRevision;
     private volatile long writtenConfigRevision;
     private final Set<String> dictionary = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> publicParticipants = ConcurrentHashMap.newKeySet();
     private volatile List<String> dictionaryIndex = List.of();
     private volatile Map<String,List<String>> dictionaryByFirstSyllable = Map.of();
     private volatile boolean dictionaryReady;
     private WordChainApi api;
+    private RewardService rewardService;
+    private DisplayService displayService;
     private org.bukkit.scheduler.BukkitTask nextMatchTask;
     private org.bukkit.scheduler.BukkitTask resetVoteTask;
     private ResetVote resetVote;
     private Connection connection;
+    private String databaseUrl;
     private WordGame game;
 
     @Override public void onEnable() {
         saveDefaultConfig();
         migrateConfigDefaults();
         try {
-            connection = new org.sqlite.JDBC().connect("jdbc:sqlite:" + getDataFolder().toPath().resolve("wordchain.db"), new Properties());
+            databaseUrl = "jdbc:sqlite:" + getDataFolder().toPath().resolve("wordchain.db");
+            connection = new org.sqlite.JDBC().connect(databaseUrl, new Properties());
             if (connection == null) throw new SQLException("SQLite JDBC driver rejected the database URL");
             try (Statement s = connection.createStatement()) {
+                s.execute("PRAGMA journal_mode=WAL");
+                s.execute("PRAGMA busy_timeout=5000");
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS words (phrase TEXT PRIMARY KEY, first_syllable TEXT NOT NULL, last_syllable TEXT NOT NULL)");
                 s.executeUpdate("CREATE INDEX IF NOT EXISTS idx_words_first ON words(first_syllable)");
                 s.executeUpdate("CREATE TABLE IF NOT EXISTS wins (uuid TEXT PRIMARY KEY, player_name TEXT NOT NULL, wins INTEGER NOT NULL DEFAULT 0, current_streak INTEGER NOT NULL DEFAULT 0, best_streak INTEGER NOT NULL DEFAULT 0)");
@@ -79,9 +88,11 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             ensureColumn("wins", "best_streak", "INTEGER NOT NULL DEFAULT 0");
         } catch (Exception e) { getLogger().severe("Cannot open word-chain database: " + e.getMessage()); getServer().getPluginManager().disablePlugin(this); return; }
         game = new WordGame();
+        rewardService = new RewardService(this);
+        displayService = new DisplayService(this);
         api = new WordChainApi() {
             @Override public boolean isGameActive() { return game.isActive(); }
-            @Override public String getCurrentKeyword() { return game.getLastWord(); }
+            @Override public String getCurrentKeyword() { return game.isActive() ? game.getLastWord() : ""; }
             @Override public boolean isKnownPhrase(String phrase) { return dictionary.contains(normalizePhrase(phrase)); }
             @Override public java.util.concurrent.CompletionStage<Integer> getWins(UUID id) { return lookupWins(id); }
         };
@@ -89,6 +100,9 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Objects.requireNonNull(getCommand("wordchain")).setExecutor(this);
         getCommand("wordchain").setTabCompleter(this);
         getServer().getPluginManager().registerEvents(this, this);
+        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            new WordChainExpansion(this).register();
+        }
         boolean refresh = getConfig().getBoolean("dictionary.refresh-on-start", true);
         if (refresh) scheduleImport(null, false);
         else Bukkit.getScheduler().runTaskAsynchronously(this, this::loadDictionaryCache);
@@ -111,8 +125,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
 
     @Override public void onDisable() {
+        if (displayService != null) displayService.stop();
         if (api != null) getServer().getServicesManager().unregister(WordChainApi.class, api);
         cancelNextMatch();
+        flushConfigNow();
         synchronized (this) {
             try { if (connection != null && !connection.isClosed()) connection.close(); } catch (SQLException e) { getLogger().warning(e.getMessage()); }
         }
@@ -124,21 +140,40 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         DuelMatch duel = duels.get(id);
         if (duel != null) {
             event.setCancelled(true); // Duel chat is private; never publish duel messages to the server chat.
-            if (isTwoSyllablePhrase(input)) Bukkit.getScheduler().runTask(this, () -> processMove(id, name, input));
+            // AsyncChatEvent already runs asynchronously: do the immutable hash lookup here,
+            // then cross to the server thread only for the actual duel/game mutation.
+            String phrase = normalizeCandidate(input);
+            if (phrase != null) {
+                boolean known = dictionary.contains(phrase);
+                Bukkit.getScheduler().runTask(this, () -> { if (known) processMove(id, name, phrase); else notifyDuelError(id, "<red>Từ chưa có trong từ điển."); });
+            }
             else Bukkit.getScheduler().runTask(this, () -> notifyDuelError(id, "<red>Trong duel, hãy gửi đúng một cụm gồm hai tiếng."));
             return;
         }
         // Ignore ordinary conversation and long messages before scheduling any main-thread work.
-        if (!game.isActive() || !isTwoSyllablePhrase(input)) return;
+        if (!game.isActive()) return;
+        String phrase = normalizeCandidate(input);
+        if (phrase == null) return;
         event.setCancelled(true); // Accepted moves are announced once by processMove; invalid moves get private feedback.
-        Bukkit.getScheduler().runTask(this, () -> processMove(id, name, input));
+        boolean known = dictionary.contains(phrase);
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (known) processMove(id, name, phrase); else notifyInvalidMove(id, phrase);
+        });
     }
 
     private void processMove(UUID id, String playerName, String raw) {
         DuelMatch duel=duels.get(id); if(duel!=null){ processDuelMove(duel,id,playerName,raw); return; }
         if (!game.isActive()) return;
+        if (!publicParticipants.contains(id)) { notifyDuelError(id, "<yellow>Muốn tham gia ván? Dùng <aqua>/noitu accept</aqua> trước khi nối từ."); return; }
+        if (!game.maySubmit(id, System.currentTimeMillis(), getConfig().getLong("anti-abuse.minimum-reaction-delay-ms", 200), getConfig().getBoolean("anti-abuse.anti-solo", true))) {
+            notifyDuelError(id, game.getLastPlayer() != null && game.getLastPlayer().equals(id)
+                    ? "<red>Hãy chờ người chơi khác nối từ trước." : "<red>Vui lòng chờ một chút trước khi trả lời.");
+            return;
+        }
         if (!game.tryMove(raw, this::isValidWord)) { if (!game.hasLegalContinuation()) resetPublicRound(); else notifyInvalidMove(id, raw); return; }
-        String clean = normalizePhrase(raw);
+        game.recordPlayer(id, System.currentTimeMillis());
+        displayService.start(game.getLastWord(), game.getMoves());
+        String clean = raw;
         Bukkit.broadcast(message("<green>" + escape(playerName) + " nối thành công: <yellow>" + escape(clean) + "</yellow>. Tiếng tiếp theo: <gold>" + escape(game.requiredSyllable()) + "</gold>.</green>"));
         Bukkit.getPluginManager().callEvent(new WordChainMoveEvent(id, playerName, clean));
         if (game.getMoves() >= getConfig().getInt("game.target-moves", 10)) {
@@ -154,7 +189,20 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void resetPublicRound() {
         String next = randomStartingWord();
         if (next == null) { game.stop(); Bukkit.broadcast(message("<yellow>Ván đã được đặt lại vì không còn nước nối hợp lệ; chưa có từ mở màn phù hợp.")); }
-        else { rememberStartingWord(next); game.start(next); Bukkit.broadcast(message("<yellow>Không còn nước nối hợp lệ. Ván mới bắt đầu với từ khóa ngẫu nhiên: <gold>" + escape(next) + "</gold>.")); }
+        else { rememberStartingWord(next); game.start(next); Bukkit.broadcast(message("<yellow>Không còn nước nối hợp lệ. Ván mới bắt đầu với từ khóa ngẫu nhiên: <gold>" + escape(next) + "</gold>.")); announcePublicJoin(next); }
+    }
+
+    private void announcePublicJoin(String startingWord) {
+        Bukkit.broadcast(message("<green>Ván Nối Từ đã mở! Từ đầu tiên: <yellow>" + escape(startingWord)
+                + "</yellow>. Muốn tham gia, bấm <click:run_command:'/noitu accept'><hover:show_text:'Bấm để tham gia'><aqua><underlined>[ACCEPT]</underlined></aqua></hover></click> hoặc gõ <aqua>/noitu accept</aqua>."));
+    }
+
+    private void joinPublicGame(Player player) {
+        if (!game.isActive()) { player.sendMessage(message("<yellow>Chưa có ván công khai nào đang mở.")); return; }
+        if (duels.containsKey(player.getUniqueId())) { player.sendMessage(message("<red>Bạn đang ở trong duel.")); return; }
+        boolean joined = publicParticipants.add(player.getUniqueId());
+        player.sendMessage(message(joined ? "<green>Bạn đã tham gia ván Nối Từ!" : "<yellow>Bạn đã tham gia ván này rồi."));
+        if (joined) Bukkit.broadcast(message("<gray>» <yellow>" + escape(player.getName()) + "</yellow> đã tham gia ván."));
     }
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -168,9 +216,9 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 if (start == null || !isTwoSyllablePhrase(start) || !isValidWord(start) || !hasContinuation(start, Map.of(start, 1), initialHardRun(start))) { sender.sendMessage(message("<red>Không có từ mở màn phù hợp. Hãy nạp thêm dữ liệu từ điển.")); return true; }
                 cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì ván mới được bắt đầu.");
                 rememberStartingWord(start);
-                cancelNextMatch(); game.start(start); Bukkit.broadcast(message("<green>Trò Nối Từ bắt đầu! Từ đầu tiên: <yellow>" + escape(start) + "</yellow>."));
+                cancelNextMatch(); publicParticipants.clear(); game.start(start); if (sender instanceof Player starter) publicParticipants.add(starter.getUniqueId()); announcePublicJoin(start);
             }
-            case "stop" -> { if (!canControl(sender)) return deny(sender); cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì trò chơi đã dừng."); cancelNextMatch(); game.stop(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
+            case "stop" -> { if (!canControl(sender)) return deny(sender); cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì trò chơi đã dừng."); cancelNextMatch(); game.stop(); publicParticipants.clear(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
             case "reset" -> { if (!canControl(sender)) return deny(sender); if (!dictionaryReady || importRunning.get()) { sender.sendMessage(message("<yellow>Đang nạp từ điển, vui lòng thử lại sau.")); return true; } requestPublicReset(sender); }
             case "vote" -> { if (!sender.hasPermission("wordchain.vote")) return deny(sender); castResetVote(sender, args); }
             case "menu" -> { if (!sender.hasPermission("wordchain.menu")) return deny(sender); if (sender instanceof Player p) openMenu(p); else sender.sendMessage("Lệnh này chỉ dành cho người chơi."); }
@@ -181,36 +229,70 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             case "difficulty" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); setDifficulty(sender, args); }
             case "duel" -> { if (!sender.hasPermission("wordchain.duel")) return deny(sender); createDuelInvite(sender,args); }
             case "accept" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); acceptDuel(sender,args); }
+            case "join" -> { if (!(sender instanceof Player player) || !player.hasPermission("wordchain.play")) return deny(sender); joinPublicGame(player); }
             case "deny" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); denyDuel(sender,args); }
-            case "add" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain add <tiếng1 tiếng2>")); return true; } String phrase = normalizePhrase(args[1] + " " + args[2]); addWordAsync(sender, phrase); }
+            case "add" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length < 2) { sender.sendMessage(message("<yellow>Dùng: /noitu add <từ gồm hai tiếng>")); return true; } String phrase = normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))); addWordAsync(sender, phrase); }
             case "report" -> { if (!sender.hasPermission("wordchain.report")) return deny(sender); reportWord(sender, args); }
             case "reports" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); showReports(sender); }
             case "approve", "reject" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain " + sub + " <tiếng1 tiếng2>")); return true; } reviewReport(sender, sub.equals("approve"), normalizePhrase(args[1] + " " + args[2])); }
             case "remove" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain remove <tiếng1 tiếng2>")); return true; } removeWord(sender, normalizePhrase(args[1] + " " + args[2])); }
             case "import" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); scheduleImport(sender, true); }
-            case "reload" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); reloadConfig(); sender.sendMessage(message("<green>Đã tải lại cấu hình.")); }
-            default -> sender.sendMessage(message("<yellow>Dùng: /wordchain <start|stop|reset|menu|top|wins|rewards|reward|difficulty|import|reload>"));
+            case "skip" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (game.isActive()) resetPublicRound(); else sender.sendMessage(message("<yellow>Hiện không có ván đang diễn ra.")); }
+            case "reload" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); reloadConfig(); migrateConfigDefaults(); if (getConfig().getBoolean("dictionary.refresh-on-start", true)) scheduleImport(sender, true); else Bukkit.getScheduler().runTaskAsynchronously(this, this::loadDictionaryCache); }
+            default -> sender.sendMessage(message("<yellow>Dùng: /wordchain <start|stop|reset|accept|join|menu|top|wins|rewards|reward|difficulty|import|reload>"));
         }
         return true;
     }
 
     private boolean canControl(CommandSender s) { return s.hasPermission("wordchain.admin") || (getConfig().getBoolean("game.members-can-control", true) && s.hasPermission("wordchain.play")); }
+    boolean placeholderGameActive() { return game != null && game.isActive(); }
+    String placeholderCurrentWord() { return game == null ? "" : game.getLastWord(); }
+    int placeholderMoves() { return game == null ? 0 : game.getMoves(); }
+    int placeholderDictionarySize() { return dictionary.size(); }
     private boolean deny(CommandSender s) { s.sendMessage(message("<red>Bạn không có quyền thực hiện thao tác này.")); return true; }
     private Component message(String s) { return MM.deserialize(s); }
-    private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); }
-    private static String normalizePhrase(String input) { return Normalizer.normalize(input.trim().toLowerCase(Locale.forLanguageTag("vi-VN")).replaceAll("\\s+", " "), Normalizer.Form.NFC); }
-    private static boolean isTwoSyllablePhrase(String input) { if(input==null||input.length()>48)return false;String n = normalizePhrase(input); return n.length() <= 48 && n.matches("[\\p{L}\\p{M}]+ [\\p{L}\\p{M}]+"); }
+    private static String escape(String value) { return MM.escapeTags(value); }
+    private static String normalizePhrase(String input) { return VietnameseNormalizer.normalize(input); }
+    private static final Pattern TWO_SYLLABLE_PHRASE = Pattern.compile("[\\p{L}\\p{M}]+ [\\p{L}\\p{M}]+");
+    private static String normalizeCandidate(String input) {
+        if (input == null || input.length() > 48 || input.indexOf(' ') < 0) return null;
+        String normalized = normalizePhrase(input);
+        return normalized.length() <= 48 && TWO_SYLLABLE_PHRASE.matcher(normalized).matches() ? normalized : null;
+    }
+    private static boolean isTwoSyllablePhrase(String input) { return normalizeCandidate(input) != null; }
 
     private boolean isValidWord(String phrase) {
-        String normalized = normalizePhrase(phrase);
-        if (normalized.length() > getConfig().getInt("game.max-phrase-length", 48) || !isTwoSyllablePhrase(normalized)) return false;
-        return dictionary.contains(normalized);
+        return phrase.length() <= getConfig().getInt("game.max-phrase-length", 48)
+                && TWO_SYLLABLE_PHRASE.matcher(phrase).matches() && dictionary.contains(phrase);
     }
 
     private void loadDictionaryCache() {
-        synchronized (this) {
-            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("SELECT phrase FROM words")) { while (rs.next()) dictionary.add(rs.getString(1)); refreshWordIndex(); dictionaryReady = true; }
+        try (Connection reader = openReadConnection(); Statement s = reader.createStatement(); ResultSet rs = s.executeQuery("SELECT phrase FROM words")) { while (rs.next()) dictionary.add(rs.getString(1)); refreshWordIndex(); dictionaryReady = true; }
             catch (SQLException e) { getLogger().severe("Could not load word index: " + e.getMessage()); }
+    }
+
+    private Connection openReadConnection() throws SQLException {
+        Connection reader = new org.sqlite.JDBC().connect(databaseUrl, new Properties());
+        if (reader == null) throw new SQLException("SQLite JDBC driver rejected the read URL");
+        try (Statement statement = reader.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=5000");
+            statement.execute("PRAGMA query_only=ON");
+            return reader;
+        } catch (SQLException e) {
+            try { reader.close(); } catch (SQLException ignored) { }
+            throw e;
+        }
+    }
+
+    /** Reopen a closed writer connection before the next transaction. */
+    private synchronized void ensureWriterConnection() throws SQLException {
+        if (connection == null || connection.isClosed() || !connection.isValid(1)) {
+            connection = new org.sqlite.JDBC().connect(databaseUrl, new Properties());
+            if (connection == null) throw new SQLException("SQLite JDBC driver rejected the database URL");
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA busy_timeout=5000");
+                statement.execute("PRAGMA journal_mode=WAL");
+            }
         }
     }
 
@@ -230,6 +312,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private int initialHardRun(String phrase) {
         int threshold = getConfig().getInt("difficulty.hard-threshold", 4);
         return getConfig().getInt("difficulty.words." + phrase, 1) >= threshold ? 1 : 0;
+    }
+    static boolean mayUseWord(Map<String, Integer> usedWords, String phrase, int configuredLimit) {
+        int limit = Math.max(1, Math.min(5, configuredLimit));
+        return usedWords.getOrDefault(phrase, 0) < limit;
     }
     private boolean hasContinuation(String phrase, Map<String,Integer> uses, int hardRun) {
         int split = phrase.indexOf(' '); if (split < 0) return false;
@@ -267,10 +353,13 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void rememberStartingWord(String phrase) {
         recentStartingWords.add(phrase);
         int limit = Math.max(0, Math.min(1000, getConfig().getInt("game.recent-start-limit", 20)));
-        while (recentStartingWords.size() > limit) recentStartingWords.remove(recentStartingWords.iterator().next());
+        synchronized (recentStartingWords) {
+            while (recentStartingWords.size() > limit) recentStartingWords.remove(recentStartingWords.iterator().next());
+        }
     }
 
     private void ensureColumn(String table, String column, String definition) throws SQLException {
+        ensureWriterConnection();
         boolean found = false;
         try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("PRAGMA table_info(" + table + ")")) { while (rs.next()) if (column.equalsIgnoreCase(rs.getString("name"))) found = true; }
         if (!found) try (Statement s = connection.createStatement()) { s.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition); }
@@ -283,15 +372,14 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         try {
                 int beforeSource = imported;
                 String[] source = spec.split("\\|", 2); String format = source.length == 2 ? source[0].trim().toLowerCase(Locale.ROOT) : "plain"; String url = source.length == 2 ? source[1].trim() : spec.trim();
-                var conn = new URL(url).openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(Math.max(timeout, format.equals("tu-dien-archive") ? 60 : timeout) * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.3 (dictionary importer)");
+                var conn = URI.create(url).toURL().openConnection(); conn.setConnectTimeout(timeout * 1000); conn.setReadTimeout(Math.max(timeout, format.equals("tu-dien-archive") ? 60 : timeout) * 1000); conn.setRequestProperty("User-Agent", "WordChain-Paper/1.3 (dictionary importer)");
                 int sourceAdded;
                 try (InputStream raw = conn.getInputStream()) {
                     if (format.equals("tu-dien-archive")) sourceAdded = importTuDienArchive(raw, maxLength);
                     else if (format.equals("json-array")) sourceAdded = importJsonPhraseArray(raw, maxLength);
                     else {
-                        InputStream stream = url.endsWith(".gz") ? new java.util.zip.GZIPInputStream(raw) : raw;
                         List<String> batch = new ArrayList<>(512); long charsRead = 0; int lineCount = 0;
-                        try (BufferedReader lines = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8), 16 * 1024)) {
+                        try (BufferedReader lines = new BufferedReader(new InputStreamReader(url.endsWith(".gz") ? new java.util.zip.GZIPInputStream(raw) : raw, StandardCharsets.UTF_8), 16 * 1024)) {
                             String line; while ((line = lines.readLine()) != null) {
                                 charsRead += line.length(); if (++lineCount > 1_000_000 || charsRead > 256_000_000L) break;
                                 if (line.length() > 16_384) continue;
@@ -469,10 +557,12 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
 
     private synchronized boolean wasSourceImported(String source) {
+        try { ensureWriterConnection(); } catch (SQLException e) { getLogger().warning("Could not reopen database: " + e.getMessage()); return false; }
         try (PreparedStatement ps = connection.prepareStatement("SELECT 1 FROM dictionary_sources WHERE source=?")) { ps.setString(1, source); try (ResultSet rs = ps.executeQuery()) { return rs.next(); } }
         catch (SQLException e) { getLogger().warning("Could not check dictionary source cache: " + e.getMessage()); return false; }
     }
     private synchronized void markSourceImported(String source, int added) throws SQLException {
+        ensureWriterConnection();
         try (PreparedStatement ps = connection.prepareStatement("INSERT INTO dictionary_sources(source,imported_at,entries_added) VALUES(?,?,?) ON CONFLICT(source) DO UPDATE SET imported_at=excluded.imported_at,entries_added=excluded.entries_added")) { ps.setString(1, source); ps.setLong(2, System.currentTimeMillis()); ps.setInt(3, added); ps.executeUpdate(); }
     }
 
@@ -495,6 +585,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private synchronized int importBatch(List<String> phrases) {
         int added = 0; boolean committed = false;
         try {
+            ensureWriterConnection();
             connection.setAutoCommit(false);
             try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO words(phrase,first_syllable,last_syllable) VALUES(?,?,?)")) {
                 for (String phrase : phrases) { String[] parts = phrase.split(" "); ps.setString(1, phrase); ps.setString(2, parts[0]); ps.setString(3, parts[1]); ps.addBatch(); }
@@ -523,6 +614,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     private synchronized boolean addWord(String phrase, int maxLength) {
         String[] parts = phrase.split(" "); if (!isTwoSyllablePhrase(phrase) || phrase.length() > maxLength || !phrase.matches("[\\p{L}\\p{M} ]+")) return false;
+        try { ensureWriterConnection(); } catch (SQLException e) { getLogger().warning("Could not reopen database: " + e.getMessage()); return false; }
         try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO words(phrase,first_syllable,last_syllable) VALUES(?,?,?)")) {
             ps.setString(1, phrase); ps.setString(2, parts[0]); ps.setString(3, parts[parts.length - 1]); boolean added = ps.executeUpdate() > 0; if (added) { dictionary.add(phrase); refreshWordIndex(); } return added;
         } catch (SQLException e) { return false; }
@@ -535,10 +627,9 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
 
     private void payReward(UUID id, int streak) {
+        rewardService.reward(id, streak);
         Player p = Bukkit.getPlayer(id); if (p == null) return;
-        double rate = Math.max(0, getConfig().getDouble("streak-rewards.bonus-per-level", 0.35));
-        double cap = Math.max(1.0, getConfig().getDouble("streak-rewards.max-multiplier", 3.0));
-        double multiplier = Math.min(cap, 1.0 + rate * (Math.log(Math.max(1, streak)) / Math.log(2)));
+        double multiplier = rewardService.multiplier(streak);
         int maxPerMaterial = Math.max(1, getConfig().getInt("streak-rewards.max-items-per-type", 64));
         for (String spec : getConfig().getStringList("rewards.items")) {
             String[] bits = spec.split(":", 2); if (bits.length != 2) continue;
@@ -553,6 +644,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void saveWin(UUID id, String name, boolean resetOtherStreaks, boolean duel, UUID duelOpponent) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> { int streak = 1; synchronized (this) {
             try {
+                ensureWriterConnection();
                 connection.setAutoCommit(false);
                 if (duel && duelOpponent != null) {
                     try (PreparedStatement reset = connection.prepareStatement("UPDATE wins SET current_streak=0 WHERE uuid=?")) { reset.setString(1, duelOpponent.toString()); reset.executeUpdate(); }
@@ -581,7 +673,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             nextMatchTask=null; if(game.isActive())return;
             String start = randomStartingWord(); if (start == null) { Bukkit.broadcast(message("<yellow>Chưa tìm được từ mở màn có nước nối hợp lệ.")); return; }
             rememberStartingWord(start);
-            game.start(start); Bukkit.broadcast(message("<green>Ván mới! Từ khóa: <yellow>" + escape(start) + "</yellow>."));
+            game.start(start); announcePublicJoin(start);
         }, delay);
     }
     private void cancelNextMatch(){if(nextMatchTask!=null){nextMatchTask.cancel();nextMatchTask=null;}}
@@ -603,7 +695,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         target.sendMessage(message("<gold>"+escape(challenger.getName())+" thách đấu Nối Từ. Dùng <yellow>/wordchain accept</yellow> hoặc <yellow>/wordchain deny</yellow>. Thời gian nối: "+(seconds==0?"không giới hạn":seconds+" giây")+"."));challenger.sendMessage(message("<green>Đã gửi lời mời đấu tới "+escape(target.getName())+"."));
         Bukkit.getScheduler().runTaskLater(this,()->duelInvites.remove(target.getUniqueId(),invite),Math.max(20,getConfig().getLong("duel.invite-expiry-seconds",60))*20L);
     }
-    private void acceptDuel(CommandSender sender,String[] args){if(!(sender instanceof Player receiver)){sender.sendMessage("Only players can accept duels.");return;}DuelInvite invite=duelInvites.remove(receiver.getUniqueId());if(invite==null){sender.sendMessage(message("<red>Không có lời mời đấu đang chờ."));return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger==null||!dictionaryReady){sender.sendMessage(message("<red>Người thách đấu đã rời mạng hoặc từ điển chưa sẵn sàng."));return;}if(duels.containsKey(challenger.getUniqueId())||duels.containsKey(receiver.getUniqueId()))return;
+    private void acceptDuel(CommandSender sender,String[] args){if(!(sender instanceof Player receiver)){sender.sendMessage("Only players can accept duels.");return;}DuelInvite invite=duelInvites.remove(receiver.getUniqueId());if(invite==null){joinPublicGame(receiver);return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger==null||!dictionaryReady){sender.sendMessage(message("<red>Người thách đấu đã rời mạng hoặc từ điển chưa sẵn sàng."));return;}if(duels.containsKey(challenger.getUniqueId())||duels.containsKey(receiver.getUniqueId()))return;
         String start=randomStartingWord();if(start==null){sender.sendMessage(message("<red>Từ điển chưa có từ mở màn khả dụng."));return;}rememberStartingWord(start);DuelMatch match=new DuelMatch(challenger.getUniqueId(),challenger.getName(),receiver.getUniqueId(),receiver.getName(),invite.connectSeconds,start);duels.put(challenger.getUniqueId(),match);duels.put(receiver.getUniqueId(),match);
         long maxTicks=Math.max(60,Math.min(3600,getConfig().getLong("duel.max-match-seconds",3600)))*20L;match.maxTask=Bukkit.getScheduler().runTaskLater(this,()->finishDuel(match,null,"Trận đấu tự dừng sau một giờ."),maxTicks).getTaskId();armDuelTurn(match);sendDuelMessage(match,"<gold>Đấu bắt đầu! <yellow>"+escape(challenger.getName())+"</yellow> đấu với <yellow>"+escape(receiver.getName())+"</yellow>. Từ khóa: <aqua>"+escape(start)+"</aqua>. Lượt đầu: "+escape(challenger.getName())+".");
     }
@@ -613,7 +705,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void processDuelMove(DuelMatch m,UUID id,String name,String raw){
         if(!m.active)return;if(!m.turn.equals(id)){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<yellow>Chưa đến lượt bạn nối từ."));return;}
         if(!hasContinuation(m.last,m.uses,m.hardRun)){resetDuelRound(m);return;}
-        String phrase=normalizePhrase(raw);String required=m.last.split(" ")[1];if(!phrase.startsWith(required+" ")){notifyDuelError(id,"<red>Nối chưa đúng; tiếng đầu phải là <yellow>"+escape(required)+"</yellow>.");return;}if(!dictionary.contains(phrase)){notifyDuelError(id,"<red>Từ chưa có trong từ điển; hãy báo bằng /wordchain report "+escape(phrase)+".");return;}
+        String phrase=raw;String required=m.last.split(" ")[1];if(!phrase.startsWith(required+" ")){notifyDuelError(id,"<red>Nối chưa đúng; tiếng đầu phải là <yellow>"+escape(required)+"</yellow>.");return;}if(!dictionary.contains(phrase)){notifyDuelError(id,"<red>Từ chưa có trong từ điển; hãy báo bằng /wordchain report "+escape(phrase)+".");return;}
         int limit=Math.max(1,Math.min(5,getConfig().getInt("anti-abuse.word-use-limit",3)));if(m.uses.getOrDefault(phrase,0)>=limit){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<red>Cụm từ này đã đạt giới hạn sử dụng."));return;}
         int difficulty=getConfig().getInt("difficulty.words."+phrase,1),threshold=getConfig().getInt("difficulty.hard-threshold",4),maxHard=Math.max(1,getConfig().getInt("anti-abuse.max-hard-words-in-row",2));if(difficulty>=threshold&&m.hardRun>=maxHard){notifyDuelError(id,"<red>Đã đạt giới hạn cụm khó liên tiếp. Hãy chọn một cụm dễ hơn.");return;}m.hardRun=difficulty>=threshold?m.hardRun+1:0;
         m.uses.merge(phrase,1,Integer::sum);m.last=phrase;m.moves++;m.turn=otherPlayer(m,id);armDuelTurn(m);sendDuelMessage(m,"<aqua>[ĐẤU]</aqua> <yellow>"+escape(name)+"</yellow>: <white>"+escape(phrase)+"</white>. Từ cần nối: <gold>"+escape(phrase.split(" ")[1])+"</gold>.");
@@ -635,26 +727,48 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final Map<String,Integer> uses=new HashMap<>();String last;UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
     private void showTop(CommandSender sender) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            List<String> rows = new ArrayList<>(); synchronized (this) {
-                try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("SELECT player_name,wins FROM wins ORDER BY wins DESC, player_name ASC LIMIT 10")) { while (rs.next()) rows.add(rs.getString(1) + ": " + rs.getInt(2)); }
-                catch (SQLException e) { getLogger().warning(e.getMessage()); }
-            }
-            Bukkit.getScheduler().runTask(this, () -> { sender.sendMessage(message("<gold><bold>Bảng xếp hạng Nối Từ</bold>")); if (rows.isEmpty()) sender.sendMessage(message("<gray>Chưa có người chiến thắng.")); for (int i=0;i<rows.size();i++) sender.sendMessage(message("<yellow>" + (i+1) + ". <white>" + escape(rows.get(i)))); });
+            List<String> rows = new ArrayList<>();
+            try (Connection reader = openReadConnection(); Statement statement = reader.createStatement();
+                 ResultSet result = statement.executeQuery("SELECT player_name,wins FROM wins ORDER BY wins DESC, player_name ASC LIMIT 10")) {
+                while (result.next()) rows.add(result.getString(1) + ": " + result.getInt(2));
+            } catch (SQLException e) { getLogger().warning("Could not read leaderboard: " + e.getMessage()); }
+            Bukkit.getScheduler().runTask(this, () -> {
+                sender.sendMessage(message("<gold><bold>Bảng xếp hạng Nối Từ</bold>"));
+                if (rows.isEmpty()) sender.sendMessage(message("<gray>Chưa có người chiến thắng."));
+                for (int i = 0; i < rows.size(); i++) sender.sendMessage(message("<yellow>" + (i + 1) + ". <white>" + escape(rows.get(i))));
+            });
         });
     }
 
     private java.util.concurrent.CompletionStage<Integer> lookupWins(UUID id) {
         java.util.concurrent.CompletableFuture<Integer> result = new java.util.concurrent.CompletableFuture<>();
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { int wins = 0; synchronized (this) { try (PreparedStatement ps = connection.prepareStatement("SELECT wins FROM wins WHERE uuid=?")) { ps.setString(1, id.toString()); try (ResultSet rs = ps.executeQuery()) { if (rs.next()) wins = rs.getInt(1); } } catch (SQLException e) { result.completeExceptionally(e); return; } } result.complete(wins); });
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try (Connection reader = openReadConnection(); PreparedStatement statement = reader.prepareStatement("SELECT wins FROM wins WHERE uuid=?")) {
+                statement.setString(1, id.toString());
+                try (ResultSet rows = statement.executeQuery()) { result.complete(rows.next() ? rows.getInt(1) : 0); }
+            } catch (SQLException e) { result.completeExceptionally(e); }
+        });
         return result;
     }
-    private void showPlayerStats(CommandSender sender, String name) {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { String foundName = null; int wins = 0, streak = 0, best = 0; synchronized (this) {
-            try (PreparedStatement ps = connection.prepareStatement("SELECT player_name,wins,current_streak,best_streak FROM wins WHERE player_name=? COLLATE NOCASE")) { ps.setString(1, name); try (ResultSet rs = ps.executeQuery()) { if (rs.next()) { foundName=rs.getString(1); wins=rs.getInt(2); streak=rs.getInt(3); best=rs.getInt(4); } } }
-            catch (SQLException e) { getLogger().warning("Could not read player stats: " + e.getMessage()); }
-        } String n=foundName; int w=wins,s=streak,b=best; Bukkit.getScheduler().runTask(this, () -> { if (n==null) sender.sendMessage(message("<red>Chưa có dữ liệu cho người chơi này.")); else sender.sendMessage(message("<gold>Thống kê <yellow>"+escape(n)+"</yellow>: <white>"+w+" thắng, chuỗi hiện tại "+s+", kỷ lục "+b+".")); }); });
-    }
 
+    private void showPlayerStats(CommandSender sender, String name) {
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            String foundName = null; int wins = 0, streak = 0, best = 0;
+            try (Connection reader = openReadConnection(); PreparedStatement statement = reader.prepareStatement(
+                    "SELECT player_name,wins,current_streak,best_streak FROM wins WHERE player_name=? COLLATE NOCASE")) {
+                statement.setString(1, name);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (rows.next()) { foundName = rows.getString(1); wins = rows.getInt(2); streak = rows.getInt(3); best = rows.getInt(4); }
+                }
+            } catch (SQLException e) { getLogger().warning("Could not read player stats: " + e.getMessage()); }
+            String resultName = foundName; int resultWins = wins, resultStreak = streak, resultBest = best;
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (resultName == null) sender.sendMessage(message("<red>Chưa có dữ liệu cho người chơi này."));
+                else sender.sendMessage(message("<gold>Thống kê <yellow>" + escape(resultName) + "</yellow>: <white>" + resultWins
+                        + " thắng, chuỗi hiện tại " + resultStreak + ", kỷ lục " + resultBest + "."));
+            });
+        });
+    }
     private void openMenu(Player p) {
         boolean admin = p.hasPermission("wordchain.admin")||p.hasPermission("wordchain.rewards")||p.hasPermission("wordchain.stats"); MenuHolder holder = new MenuHolder(MenuMode.MAIN);
         Inventory inv = Bukkit.createInventory(holder, admin ? 45 : 27, message(getConfig().getString("menu.title", "<dark_green>Nối Từ</dark_green>"))); holder.inventory = inv;
@@ -662,6 +776,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         put(inv, 12, Material.BARRIER, "<red>Dừng ván", "<gray>Dừng trò chơi hiện tại");
         put(inv, 14, Material.SUNFLOWER, "<yellow>Đề xuất ván mới", "<gray>Người chơi khác bỏ phiếu; cần ít nhất 1/3 đồng ý");
         put(inv, 16, Material.GOLD_INGOT, "<gold>Bảng xếp hạng", "<gray>Xem 10 người thắng nhiều nhất");
+        put(inv, 20, Material.LIME_DYE, "<green>Tham gia ván", "<gray>Chấp nhận lời mời hoặc vào ván công khai");
+        put(inv, 24, Material.IRON_SWORD, "<aqua>Thách đấu duel", "<gray>Dùng /noitu duel <tên người chơi>");
         put(inv, 22, Material.BOOK, "<aqua>Thông tin", "<gray>Từ trong dữ liệu: " + countWords(), "<gray>Mục tiêu: " + getConfig().getInt("game.target-moves", 10) + " lượt");
         if (admin) { put(inv, 29, Material.HOPPER, "<gold>Nhập từ điển", "<gray>Tải các nguồn đã cấu hình"); put(inv, 31, Material.WRITABLE_BOOK, "<aqua>Báo cáo từ", "<gray>Xem các từ người chơi báo"); put(inv, 33, Material.COMPARATOR, "<yellow>Tải lại cấu hình", "<gray>Đọc lại config.yml"); put(inv, 37, Material.DIAMOND, "<gold>Chỉnh phần thưởng", "<gray>Điều chỉnh cấu hình quà thắng"); put(inv, 41, Material.PLAYER_HEAD, "<aqua>Thống kê người chơi", "<gray>Xem thắng và chuỗi thắng"); }
         p.openInventory(inv);
@@ -672,11 +788,42 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         e.setCancelled(true); if (e.getClickedInventory() == null || e.getClickedInventory() != e.getView().getTopInventory()) return;
         if (holder.mode == MenuMode.REWARDS) { if (!hasRewardPermission(p)) return; String material = holder.targets.get(e.getRawSlot()); if (material != null) adjustReward(p, material, e.isRightClick() ? -1 : 1, e.isShiftClick()); return; }
         if (holder.mode == MenuMode.WINS) { if (!hasStatsPermission(p)) return; String target = holder.targets.get(e.getRawSlot()); if (target != null) showPlayerStats(p, target); return; }
-        switch (e.getRawSlot()) { case 10 -> p.performCommand("wordchain start"); case 12 -> p.performCommand("wordchain stop"); case 14 -> p.performCommand("wordchain reset"); case 16 -> p.performCommand("wordchain top"); case 29 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain import"); } case 31 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reports"); } case 33 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reload"); } case 37 -> { if (hasRewardPermission(p)) openRewardsMenu(p); } case 41 -> { if (hasStatsPermission(p)) openWinsMenu(p); } default -> {} }
+        if (holder.mode == MenuMode.DUEL_TARGET) {
+            String targetId = holder.targets.get(e.getRawSlot());
+            if (targetId == null) return;
+            Player target = Bukkit.getPlayer(UUID.fromString(targetId));
+            if (target == null) { p.sendMessage(message("<yellow>Người chơi vừa offline.")); openDuelMenu(p); return; }
+            p.closeInventory(); createDuelInvite(p, new String[]{"duel", target.getName()}); return;
+        }
+        switch (e.getRawSlot()) { case 10 -> p.performCommand("wordchain start"); case 12 -> p.performCommand("wordchain stop"); case 14 -> p.performCommand("wordchain reset"); case 16 -> p.performCommand("wordchain top"); case 20 -> p.performCommand("wordchain accept"); case 24 -> openDuelMenu(p); case 29 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain import"); } case 31 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reports"); } case 33 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reload"); } case 37 -> { if (hasRewardPermission(p)) openRewardsMenu(p); } case 41 -> { if (hasStatsPermission(p)) openWinsMenu(p); } default -> {} }
     }
     @EventHandler public void onMenuDrag(InventoryDragEvent e) { if (e.getView().getTopInventory().getHolder() instanceof MenuHolder) e.setCancelled(true); }
 
-    private enum MenuMode { MAIN, REWARDS, WINS }
+    private void openDuelMenu(Player challenger) {
+        if (!challenger.hasPermission("wordchain.duel")) { deny(challenger); return; }
+        MenuHolder holder = new MenuHolder(MenuMode.DUEL_TARGET);
+        Inventory inventory = Bukkit.createInventory(holder, 54, message("<dark_aqua>Chọn người chơi đấu duel</dark_aqua>"));
+        holder.inventory = inventory;
+        int slot = 0;
+        for (Player target : Bukkit.getOnlinePlayers().stream().filter(p -> !p.equals(challenger))
+                .filter(p -> !duels.containsKey(p.getUniqueId())).sorted(Comparator.comparing(Player::getName, String.CASE_INSENSITIVE_ORDER)).toList()) {
+            if (slot >= inventory.getSize()) break;
+            ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+            if (head.getItemMeta() instanceof SkullMeta meta) {
+                meta.setOwningPlayer(target);
+                meta.displayName(message("<yellow>" + escape(target.getName())));
+                meta.lore(List.of(message("<gray>Nhấn để gửi lời mời duel")));
+                head.setItemMeta(meta);
+            }
+            inventory.setItem(slot, head);
+            holder.targets.put(slot, target.getUniqueId().toString());
+            slot++;
+        }
+        if (slot == 0) { challenger.sendMessage(message("<yellow>Không có người chơi phù hợp để thách đấu.")); return; }
+        challenger.openInventory(inventory);
+    }
+
+    private enum MenuMode { MAIN, REWARDS, WINS, DUEL_TARGET }
     private final class MenuHolder implements InventoryHolder {
         private final MenuMode mode;
         private final Map<Integer,String> targets = new HashMap<>();
@@ -704,10 +851,37 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private boolean hasRewardPermission(Player p){return p.hasPermission("wordchain.admin")||p.hasPermission("wordchain.rewards");}
     private boolean hasStatsPermission(Player p){return p.hasPermission("wordchain.admin")||p.hasPermission("wordchain.stats");}
     private void persistConfigAsync(){String snapshot=getConfig().saveToString();long revision=++configRevision;java.nio.file.Path path=getDataFolder().toPath().resolve("config.yml");Bukkit.getScheduler().runTaskAsynchronously(this,()->{synchronized(configWriteLock){if(revision<writtenConfigRevision)return;try{java.nio.file.Files.writeString(path,snapshot,StandardCharsets.UTF_8);writtenConfigRevision=revision;}catch(IOException e){getLogger().warning("Could not save config: "+e.getMessage());}}});}
-    private void openWinsMenu(Player p){
-        Bukkit.getScheduler().runTaskAsynchronously(this,()->{List<String[]> rows=new ArrayList<>();synchronized(this){try(Statement s=connection.createStatement();ResultSet rs=s.executeQuery("SELECT player_name,wins,current_streak,best_streak FROM wins ORDER BY wins DESC LIMIT 18")){while(rs.next())rows.add(new String[]{rs.getString(1),"Thắng: "+rs.getInt(2)+" | Chuỗi: "+rs.getInt(3)+" | Kỷ lục: "+rs.getInt(4)});}catch(SQLException e){getLogger().warning(e.getMessage());}}Bukkit.getScheduler().runTask(this,()->{MenuHolder holder=new MenuHolder(MenuMode.WINS);Inventory inv=Bukkit.createInventory(holder,27,message("<dark_green>Thống kê người chơi</dark_green>"));holder.inventory=inv;int slot=0;for(String[] row:rows){holder.targets.put(slot,row[0]);put(inv,slot,Material.PAPER,"<yellow>"+escape(row[0]),"<gray>"+row[1],"<gray>Nhấp để xem chi tiết");slot++;}p.openInventory(inv);});});
+    private void flushConfigNow() {
+        synchronized (configWriteLock) {
+            if (configRevision <= writtenConfigRevision) return;
+            try {
+                java.nio.file.Files.writeString(getDataFolder().toPath().resolve("config.yml"), getConfig().saveToString(), StandardCharsets.UTF_8);
+                writtenConfigRevision = configRevision;
+            } catch (IOException e) { getLogger().warning("Could not flush config on shutdown: " + e.getMessage()); }
+        }
     }
 
+    private void openWinsMenu(Player p) {
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            List<String[]> rows = new ArrayList<>();
+            try (Connection reader = openReadConnection(); Statement statement = reader.createStatement();
+                 ResultSet result = statement.executeQuery("SELECT player_name,wins,current_streak,best_streak FROM wins ORDER BY wins DESC LIMIT 18")) {
+                while (result.next()) rows.add(new String[]{result.getString(1), "Thắng: " + result.getInt(2) + " | Chuỗi: " + result.getInt(3) + " | Kỷ lục: " + result.getInt(4)});
+            } catch (SQLException e) { getLogger().warning("Could not load wins menu: " + e.getMessage()); }
+            Bukkit.getScheduler().runTask(this, () -> {
+                MenuHolder holder = new MenuHolder(MenuMode.WINS);
+                Inventory inventory = Bukkit.createInventory(holder, 27, message("<dark_green>Thống kê người chơi</dark_green>"));
+                holder.inventory = inventory;
+                int slot = 0;
+                for (String[] row : rows) {
+                    holder.targets.put(slot, row[0]);
+                    put(inventory, slot, Material.PAPER, "<yellow>" + escape(row[0]), "<gray>" + row[1], "<gray>Nhấp để xem chi tiết");
+                    slot++;
+                }
+                p.openInventory(inventory);
+            });
+        });
+    }
     private void reportWord(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) { sender.sendMessage("Only players can report words."); return; }
         if (args.length != 3) { sender.sendMessage(message("<yellow>Dùng: /wordchain report <tiếng1 tiếng2>")); return; }
@@ -716,14 +890,23 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Long last = reportCooldown.get(player.getUniqueId()); if (last != null && now - last < wait) { sender.sendMessage(message("<red>Hãy đợi trước khi gửi báo cáo khác.")); return; }
         UUID reporterId = player.getUniqueId(); String reporterName = player.getName();
         reportCooldown.put(player.getUniqueId(), now);
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { int result = 0; try { synchronized (this) { try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO word_reports(phrase,reporter_uuid,reporter_name,created_at,status) VALUES(?,?,?,?, 'PENDING')")) { ps.setString(1, phrase); ps.setString(2, reporterId.toString()); ps.setString(3, reporterName); ps.setLong(4, now); result = ps.executeUpdate(); } } } catch (SQLException ex) { getLogger().warning(ex.getMessage()); }
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { int result = 0; try { synchronized (this) { ensureWriterConnection(); try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO word_reports(phrase,reporter_uuid,reporter_name,created_at,status) VALUES(?,?,?,?, 'PENDING')")) { ps.setString(1, phrase); ps.setString(2, reporterId.toString()); ps.setString(3, reporterName); ps.setLong(4, now); result = ps.executeUpdate(); } } } catch (SQLException ex) { getLogger().warning(ex.getMessage()); }
             int rows = result; Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message(rows > 0 ? "<green>Đã gửi báo cáo từ: " + escape(phrase) : "<yellow>Từ này đã được báo cáo trước đó hoặc không thể lưu."))); });
     }
     private void showReports(CommandSender sender) {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { List<String> rows = new ArrayList<>(); synchronized (this) {
-            try (Statement s = connection.createStatement(); ResultSet rs = s.executeQuery("SELECT phrase,reporter_name FROM word_reports WHERE status='PENDING' ORDER BY created_at LIMIT 10")) { while (rs.next()) rows.add(rs.getString(1) + " — " + rs.getString(2)); }
-            catch (SQLException ex) { getLogger().warning(ex.getMessage()); }
-        } Bukkit.getScheduler().runTask(this, () -> { sender.sendMessage(message("<gold><bold>Báo cáo từ đang chờ</bold>")); if (rows.isEmpty()) { sender.sendMessage(message("<gray>Không có báo cáo chờ xử lý.")); return; } rows.forEach(row -> sender.sendMessage(message("<yellow>• <white>" + escape(row)))); sender.sendMessage(message("<gray>Dùng /wordchain approve hoặc reject <tiếng1 tiếng2>.")); }); });
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            List<String> rows = new ArrayList<>();
+            try (Connection reader = openReadConnection(); Statement statement = reader.createStatement();
+                 ResultSet result = statement.executeQuery("SELECT phrase,reporter_name FROM word_reports WHERE status='PENDING' ORDER BY created_at LIMIT 10")) {
+                while (result.next()) rows.add(result.getString(1) + " — " + result.getString(2));
+            } catch (SQLException e) { getLogger().warning("Could not load pending reports: " + e.getMessage()); }
+            Bukkit.getScheduler().runTask(this, () -> {
+                sender.sendMessage(message("<gold><bold>Báo cáo từ đang chờ</bold>"));
+                if (rows.isEmpty()) { sender.sendMessage(message("<gray>Không có báo cáo chờ xử lý.")); return; }
+                rows.forEach(row -> sender.sendMessage(message("<yellow>• <white>" + escape(row))));
+                sender.sendMessage(message("<gray>Dùng /wordchain approve hoặc reject <tiếng1 tiếng2>."));
+            });
+        });
     }
     private void reviewReport(CommandSender sender, boolean approve, String phrase) {
         if (!isTwoSyllablePhrase(phrase)) { sender.sendMessage(message("<red>Chỉ xử lý cụm đúng hai tiếng.")); return; }
@@ -731,6 +914,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> { boolean changed = false;
         synchronized (this) {
             try {
+                ensureWriterConnection();
                 if (approve) addWord(phrase, maxLength);
                 try (PreparedStatement ps = connection.prepareStatement("UPDATE word_reports SET status=? WHERE phrase=? AND status='PENDING'")) { ps.setString(1, approve ? "APPROVED" : "REJECTED"); ps.setString(2, phrase); changed = ps.executeUpdate() > 0; }
             } catch (SQLException ex) { getLogger().warning(ex.getMessage()); }
@@ -738,10 +922,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
     private void removeWord(CommandSender sender, String phrase) {
         if (!isTwoSyllablePhrase(phrase)) { sender.sendMessage(message("<red>Chỉ xóa cụm đúng hai tiếng.")); return; }
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { boolean removed = false; synchronized (this) { try (PreparedStatement ps = connection.prepareStatement("DELETE FROM words WHERE phrase=?")) { ps.setString(1, phrase); removed = ps.executeUpdate() > 0; } catch (SQLException ex) { getLogger().warning(ex.getMessage()); } } if (removed) { dictionary.remove(phrase); refreshWordIndex(); } boolean result = removed; Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message(result ? "<green>Đã xóa: " + escape(phrase) : "<red>Không tìm thấy từ."))); });
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> { boolean removed = false; synchronized (this) { try { ensureWriterConnection(); try (PreparedStatement ps = connection.prepareStatement("DELETE FROM words WHERE phrase=?")) { ps.setString(1, phrase); removed = ps.executeUpdate() > 0; } } catch (SQLException ex) { getLogger().warning(ex.getMessage()); } } if (removed) { dictionary.remove(phrase); refreshWordIndex(); } boolean result = removed; Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message(result ? "<green>Đã xóa: " + escape(phrase) : "<red>Không tìm thấy từ."))); });
     }
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (args.length == 1) return List.of("start", "stop", "reset", "vote", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 1) return List.of("start", "stop", "reset", "vote", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "join", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload", "skip").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         if (args.length == 2 && args[0].equalsIgnoreCase("vote")) return List.of("yes", "no").stream().filter(s -> s.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         return List.of();
     }
@@ -800,7 +984,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         cancelNextMatch();
         rememberStartingWord(start);
         game.start(start);
-        Bukkit.broadcast(message("<green>Ván mới được " + escape(requesterName) + " yêu cầu bắt đầu! Từ khóa ngẫu nhiên: <yellow>" + escape(start) + "</yellow>."));
+        Bukkit.broadcast(message("<green>Ván mới được " + escape(requesterName) + " yêu cầu bắt đầu!"));
+        announcePublicJoin(start);
     }
 
     private void clearResetVote() {
@@ -817,25 +1002,29 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     private final class WordGame {
         private String lastWord = ""; private int moves; private boolean active;
+        private UUID lastPlayer; private long lastMoveAt;
         private final Map<String,Integer> used = new HashMap<>(); private int hardRun;
-        synchronized void start(String phrase) { used.clear(); lastWord = phrase; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; active = true; }
+        synchronized void start(String phrase) { used.clear(); lastWord = phrase; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; lastPlayer = null; lastMoveAt = System.currentTimeMillis(); active = true; if (displayService != null) displayService.start(phrase, moves); }
         synchronized void reset() { used.clear(); lastWord = ""; moves = 0; active = false; }
-        synchronized void stop() { active = false; }
+        synchronized void stop() { active = false; if (displayService != null) displayService.stop(); }
         synchronized boolean isActive() { return active; }
         synchronized int getMoves() { return moves; }
         synchronized String getLastWord() { return lastWord; }
+        synchronized UUID getLastPlayer() { return lastPlayer; }
+        synchronized boolean maySubmit(UUID player, long now, long minimumDelay, boolean antiSolo) { return active && (!antiSolo || lastPlayer == null || !lastPlayer.equals(player)) && now - lastMoveAt >= Math.max(0, minimumDelay); }
+        synchronized void recordPlayer(UUID player, long now) { lastPlayer = player; lastMoveAt = now; }
         synchronized String requiredSyllable() { String[] parts = lastWord.split(" "); return parts[parts.length - 1]; }
         synchronized boolean hasLegalContinuation() { return active && hasContinuation(lastWord, used, hardRun); }
         synchronized boolean tryMove(String input, java.util.function.Predicate<String> dictionary) {
-            if (!active) return false; String phrase = normalizePhrase(input); String[] parts = phrase.split(" ");
+            if (!active) return false; String phrase = input; String[] parts = phrase.split(" ");
             if (parts.length != 2 || !parts[0].equals(requiredSyllable()) || !dictionary.test(phrase)) return false;
-            int maxUses=Math.max(1,Math.min(5,getConfig().getInt("anti-abuse.word-use-limit",3)));
-            if(used.getOrDefault(phrase,0)>=maxUses)return false;
+            if (!mayUseWord(used, phrase, getConfig().getInt("anti-abuse.word-use-limit", 3))) return false;
             int difficulty=getConfig().getInt("difficulty.words."+phrase,1), threshold=getConfig().getInt("difficulty.hard-threshold",4), maxHard=Math.max(1,getConfig().getInt("anti-abuse.max-hard-words-in-row",2));
             if(difficulty>=threshold&&hardRun>=maxHard)return false;
             if(difficulty>=threshold)hardRun++;else hardRun=0;
             used.merge(phrase,1,Integer::sum); lastWord = phrase; moves++; return true;
         }
     }
-    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();if(resetVote!=null&&resetVote.requester().equals(id))cancelResetVote("<yellow>Đề xuất ván mới bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);ResetVote vote=resetVote;if(vote!=null&&vote.requester().equals(id))cancelResetVote("<yellow>Đề xuất ván mới bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onJoin(PlayerJoinEvent event) { if (displayService != null) displayService.showTo(event.getPlayer()); }
 }

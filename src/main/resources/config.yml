@@ -11,6 +11,10 @@ rewards:
   items:
     - "DIAMOND:3"
     - "EMERALD:5"
+  economy:
+    enabled: true
+    base: 10.0
+  commands: []
 dictionary:
   # Sources may be plain|URL (one phrase per line), tab|URL (entry in column one),
   # json-array|URL (JSON objects with a text property), kaikki|URL (Wiktionary JSONL),
@@ -35,8 +39,14 @@ streak-rewards:
   max-multiplier: 3.0
   max-items-per-type: 64
 anti-abuse:
+  anti-solo: true
+  minimum-reaction-delay-ms: 200
   word-use-limit: 3
   max-hard-words-in-row: 2
+display:
+  turn-seconds: 30
+  bossbar-title: "<yellow>Nối từ • <white><word></white>"
+  actionbar: "<gray>Còn <yellow><seconds></yellow> giây • Chuỗi: <gold><streak></gold>"
 difficulty:
   hard-threshold: 4
   words: {}

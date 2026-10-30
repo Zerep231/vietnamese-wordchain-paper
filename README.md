@@ -1,87 +1,114 @@
-# WordChain (Paper)
+# WordChain
 
-MIT licensed. See [LICENSE](LICENSE).
+Plugin nối từ tiếng Việt cho Paper, với chế độ chơi công khai và đấu tay đôi, menu GUI, bảng xếp hạng, phần thưởng và từ điển có thể nhập thêm.
 
-A Vietnamese word-chain minigame for Paper 26.2+ and Java 25. It imports UTF-8 word lists, Kaikki JSONL, and the `NhanAZ-Drops/tu-dien-tieng-viet` release archive in the background, stores normalized entries in SQLite, and indexes phrases by first syllable. Wins and leaderboard totals persist across restarts.
+> **Yêu cầu hiện tại:** Java 25 và Paper 26.1 trở lên. Maven biên dịch với Paper API 26.3.
 
-## Build and install
+## Tính năng
 
-Run `mvn verify` with Java 25. Copy `target/word-chain-1.3.1.jar` into the server's `plugins` folder and restart. Paper downloads SQLite JDBC as a declared library on first startup. Edit `plugins/WordChain/config.yml`, then run `/wordchain reload`.
+- Chơi nối cụm từ tiếng Việt gồm đúng hai âm tiết; dữ liệu được chuẩn hóa Unicode NFC và không phân biệt hoa thường.
+- Menu trong game, ván công khai, duel riêng, lời mời/accept/deny, bỏ phiếu bắt đầu lại ván công khai.
+- Giới hạn dùng lại từ, giới hạn từ khó liên tiếp, tránh lặp từ khóa mở đầu gần đây và tự khởi tạo ván mới khi không còn nước hợp lệ.
+- Thống kê thắng/chuỗi thắng và top 10 được lưu trong SQLite.
+- Phần thưởng vật phẩm, tích hợp Vault tùy chọn và lệnh thưởng tùy chỉnh.
+- Nhập từ điển bất đồng bộ từ danh sách văn bản, JSON, Kaikki JSONL hoặc gói dữ liệu từ điển; dữ liệu đã nhập được lưu/cache trong SQLite.
+- Tích hợp PlaceholderAPI tùy chọn và API Java cho plugin khác.
 
-## Commands and permissions
+## Cài đặt
 
-| Command | Description | Permission |
-| --- | --- | --- |
-| `/wordchain` or `/wc` | Open the game menu | Any player |
-| `/wordchain start [two-word phrase]` | Start with a random viable phrase, or the specified phrase | `wordchain.play` (default: everyone) |
-| `/wordchain stop` | Stop the current game | `wordchain.play` |
-| `/wordchain reset` | Propose starting a fresh public game with a random keyword | `wordchain.play` |
-| `/wordchain vote <yes|no>` | Vote on a public request to start a fresh game | `wordchain.vote` |
-| `/wordchain top` | Show the persistent top ten | Any player |
-| `/wordchain wins <player>` | Show wins, current streak, and best streak | `wordchain.stats` |
-| `/wordchain rewards` | Open reward editor | `wordchain.rewards` |
-| `/wordchain reward add <material> <amount>` | Add/update a reward | `wordchain.rewards` |
-| `/wordchain reward remove <material>` | Remove a reward | `wordchain.rewards` |
-| `/wordchain difficulty <first> <last> <1-5>` | Tag phrase difficulty | `wordchain.admin` |
-| `/wordchain duel <player> [seconds\|off]` | Challenge a player; `off` disables per-turn timeout | Any player |
-| `/wordchain accept` / `/wordchain deny` | Accept or decline a pending duel | Any player |
-| `/wordchain report <two syllables>` | Report a missing or disputed phrase | Any player, 30 second cooldown |
-| `/wordchain add <two syllables>` | Add a phrase directly | `wordchain.admin` |
-| `/wordchain remove <two syllables>` | Remove a phrase | `wordchain.admin` |
-| `/wordchain reports` | List pending reports | `wordchain.admin` |
-| `/wordchain approve <two syllables>` | Approve a report and add its phrase | `wordchain.admin` |
-| `/wordchain reject <two syllables>` | Reject a report | `wordchain.admin` |
-| `/wordchain import` | Import configured sources | `wordchain.admin` (default: operators) |
-| `/wordchain reload` | Reload configuration | `wordchain.admin` |
+1. Cài Java 25 và Paper 26.1+.
+2. Tải JAR từ mục **Releases**, hoặc tự build theo hướng dẫn bên dưới.
+3. Đặt `word-chain-1.3.1.jar` vào thư mục `plugins/` rồi khởi động máy chủ.
+4. Chỉnh `plugins/WordChain/config.yml`. Sau khi thay đổi, chạy `/wordchain reload`.
 
-Set `game.members-can-control: false` to restrict start/stop/reset to `wordchain.admin`. The menu actions use the same permission checks as commands.
+SQLite JDBC được khai báo trong `plugin.yml` dưới dạng thư viện Paper tải khi khởi động. Vault và PlaceholderAPI là tùy chọn; cài plugin tương ứng để bật tích hợp.
 
-### LuckPerms setup
+## Build và kiểm thử
 
-Basic player permissions are available to everyone by default. To assign them explicitly to LuckPerms' default group, run:
-
-```text
-/lp group default permission set wordchain.player true
+```bash
+mvn clean verify
 ```
 
-`wordchain.player` includes `wordchain.play`, `wordchain.menu`, `wordchain.top`, `wordchain.duel`, `wordchain.duel.respond`, `wordchain.report`, and `wordchain.vote`. Remove a specific permission from the default group to restrict that command, for example `/lp group default permission set wordchain.duel false`. Admin permissions remain separate: `wordchain.admin`, `wordchain.rewards`, and `wordchain.stats`.
+Lệnh build cần JDK 25 cùng Maven 3.9+. JAR đầu ra: `target/word-chain-1.3.1.jar`.
 
-`/wordchain reset` asks the other online players to approve a fresh public round. At least one third of the online players at proposal time (rounded up) must vote yes; the proposer cannot vote. A matching one-third no vote rejects the proposal. Votes expire after `game.reset-vote-seconds` (default 30). Players in a duel have their exact two-syllable turns delivered privately to both duelists; duel chat is cancelled from global chat.
+## Lệnh và quyền
 
-## Configuration
+Các lệnh có thể dùng qua `/wordchain`, alias `/wc` hoặc `/noitu`.
 
-- `game.target-moves`: valid linked phrases needed to win.
-- `game.recent-start-limit`: number of recent random start phrases to avoid repeating.
-- `game.reset-vote-seconds`: how long a public reset vote stays open (5–120 seconds).
-- `rewards.items`: list of `MATERIAL:amount` rewards, for example `DIAMOND:3`.
-- `dictionary.sources`: source entries use `plain|URL`, `tab|URL`, `json-array|URL` (JSON objects with a `text` field), `kaikki|URL`, or `tu-dien-archive|URL`. The Vietnamese-dictionary-api JSON is streamed from GitHub Raw and only exactly two-syllable phrases are indexed. The NhanAZ release archive also streams through the importer; only `data/processed/words/*.json` is parsed. The 124 MB archive is not stored on disk.
-- `dictionary.refresh-on-start`: check configured sources asynchronously on startup. Imported source URLs are recorded in SQLite and skipped on later starts; `/wordchain import` forces a refresh.
-- `menu.title`: MiniMessage inventory title.
-- `streak-rewards`: logarithmic win-streak multiplier and payout caps. The formula is `min(cap, 1 + rate * log2(streak))`.
-- `anti-abuse.word-use-limit`: maximum uses of a phrase in a match, clamped to 1–5; the default is 3.
-- `anti-abuse.max-hard-words-in-row` and `difficulty.hard-threshold`: stop long runs of admin-tagged difficult phrases. Set phrase levels with `/wordchain difficulty`.
-- `duel.default-connect-seconds`: default turn deadline; players can override it with seconds or `off`. Every duel still stops after at most one hour.
-- `game.next-match-delay-seconds`: delay before the next randomly selected keyword after a match.
+| Lệnh | Tác dụng | Quyền |
+| --- | --- | --- |
+| `/wordchain` hoặc `/wordchain menu` | Mở menu trò chơi | `wordchain.menu` |
+| `/wordchain start [cụm-từ]` | Bắt đầu ván công khai | `wordchain.play` |
+| `/wordchain stop` | Dừng ván công khai | `wordchain.play` |
+| `/wordchain reset` | Đề xuất mở ván công khai mới | `wordchain.play` |
+| `/wordchain vote <yes\|no>` | Bỏ phiếu cho đề xuất reset | `wordchain.vote` |
+| `/wordchain duel <người-chơi> [giây\|off]` | Mời đấu tay đôi | `wordchain.duel` |
+| `/wordchain accept` · `/wordchain deny` | Nhận hoặc từ chối lời mời | `wordchain.duel.respond` |
+| `/wordchain top` | Xem bảng xếp hạng thắng | `wordchain.top` |
+| `/wordchain wins <người-chơi>` | Xem thống kê người chơi | `wordchain.stats` |
+| `/wordchain report <cụm-từ>` | Báo từ còn thiếu hoặc cần xem xét | `wordchain.report` |
+| `/wordchain add <cụm-từ>` · `/wordchain remove <cụm-từ>` | Sửa từ điển runtime | `wordchain.admin` |
+| `/wordchain import` | Nhập lại các nguồn từ điển cấu hình | `wordchain.admin` |
+| `/wordchain reload` | Tải lại cấu hình | `wordchain.admin` |
+| `/wordchain skip` | Bỏ qua từ hiện tại | `wordchain.admin` |
+| `/wordchain rewards` · `/wordchain reward ...` | Xem/chỉnh phần thưởng | `wordchain.rewards` |
+| `/wordchain difficulty <âm-đầu> <âm-cuối> <1-5>` | Đặt độ khó cụm từ | `wordchain.admin` |
+| `/wordchain reports`, `/approve`, `/reject` | Quản lý báo cáo từ | `wordchain.admin` |
 
-The admin menu includes reward editing and a wins/streak browser. `wordchain.rewards` and `wordchain.stats` are separate operator permissions; `wordchain.admin` grants both. Other plugins can obtain the `com.example.wordchain.api.WordChainApi` service and listen for `WordChainMoveEvent` and `WordChainWinEvent`; database-backed API reads return a `CompletionStage`.
+`wordchain.player` là nhóm quyền mặc định cho người chơi và bao gồm quyền chơi, menu, top, duel, báo từ và vote. `wordchain.admin` mặc định dành cho operator. Có thể đặt `game.members-can-control: false` để chỉ admin được start/stop/reset.
 
-Public-game streaks count consecutive server-wide match winners. Duel wins advance the winner's streak and reset only the opponent's streak. Phrase difficulty defaults to level 1; admins can tag a phrase from 1 to 5. If a difficulty rule or used-word limit leaves no legal continuation, the round resets with a fresh random keyword instead of stalling. Starts avoid recent keywords where possible. Invalid two-syllable moves receive a private hint with a short per-player cooldown; longer chat messages are ignored.
+## Cấu hình
 
-The default sources include the Viet39K phrase list, the [`Vietnamese-dictionary-api` JSON dataset](https://github.com/MegumiKatou02/Vietnamese-dictionary-api/blob/main/vietnamese_words.json), and the [NhanAZ-Drops Vietnamese dictionary release](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/releases/tag/v0.4.0-beta). The API repository is marked AGPL-3.0 and describes itself as an API test project; the dictionary data's separate license and provenance are not stated clearly. This plugin streams the JSON file without bundling it. Review the upstream terms before redistributing imported database contents. The NhanAZ release reports 89,569 headwords and contains mixed per-source terms (MIT, GPL, CC BY-SA/GFDL, public domain, and some sources marked license-unclear); review its [data card](https://github.com/NhanAZ-Drops/tu-dien-tieng-viet/blob/main/reports/current/DATA_CARD.md) before redistribution.
+Cấu hình mặc định nằm ở `src/main/resources/config.yml`; bản đang chạy nằm tại `plugins/WordChain/config.yml`.
 
-The [Kaikki Vietnamese Wiktionary extract](https://kaikki.org/viwiktionary/rawdata.html) is a machine-readable Wiktionary dump. Wiktionary-derived material is provided under CC BY-SA / GFDL terms; keep attribution and share-alike obligations in mind when redistributing data.
+| Nhóm | Tùy chọn chính |
+| --- | --- |
+| `game` | Số lượt để thắng, quyền điều khiển, độ dài cụm từ, độ trễ ván tiếp theo và thời hạn vote reset |
+| `dictionary` | Danh sách nguồn, tự làm mới lúc khởi động, timeout tải dữ liệu |
+| `rewards` | Danh sách vật phẩm, bật/tắt Vault, tiền cơ bản và lệnh console |
+| `streak-rewards` | Tỉ lệ thưởng theo chuỗi thắng và giới hạn hệ số/vật phẩm |
+| `anti-abuse` | Chống solo, thời gian phản ứng tối thiểu, giới hạn lặp từ và từ khó liên tiếp |
+| `display` | Thời lượng lượt, nội dung BossBar và ActionBar (MiniMessage) |
+| `duel` | Số lượt, thời gian nhận lời mời, thời gian mỗi lượt và giới hạn trận |
+| `menu`, `reports`, `difficulty` | Tiêu đề menu, cooldown báo từ và ngưỡng/độ khó |
 
-Optional Kaikki/Wiktionary JSONL source (large; disabled by default):
+Ví dụ nguồn từ điển được hỗ trợ:
 
 ```yaml
 dictionary:
+  refresh-on-start: true
+  request-timeout-seconds: 20
   sources:
-    - "plain|https://raw.githubusercontent.com/duyet/vietnamese-wordlist/master/Viet39K.txt"
-    - "kaikki|https://kaikki.org/viwiktionary/raw-wiktextract-data.jsonl.gz"
+    - "plain|https://example.org/vietnamese-phrases.txt"
+    - "tab|https://example.org/phrases.tsv"
+    - "json-array|https://example.org/phrases.json"
+    - "kaikki|https://example.org/vietnamese.jsonl.gz"
+    - "tu-dien-archive|https://example.org/dictionary.tar.gz"
 ```
 
-The importer has connection/read timeouts, skips oversized lines, caps a source at one million lines or 256 MB of decompressed text, and writes in SQLite batches. Chat messages are filtered to exactly two Vietnamese syllables before queueing game work. Menu clicks and drags are cancelled for plugin menus, and admin slots are permission checked.
+Mỗi nguồn cần được rà soát giấy phép và nguồn gốc dữ liệu trước khi dùng hoặc phân phối lại. Danh sách mặc định trong config lấy từ các dự án bên thứ ba; plugin không đóng gói sẵn những bộ dữ liệu đó. Chỉ các mục tiếng Việt gồm đúng hai âm tiết mới được đưa vào chỉ mục trò chơi.
 
-## Notes
+## PlaceholderAPI
 
-The chat event is asynchronous, so the plugin transfers move processing and all player/world changes to Paper's main thread. HTTP imports and leaderboard reads run asynchronously. The dictionary and wins are stored in `plugins/WordChain/wordchain.db`.
+Khi PlaceholderAPI được cài, expansion nội bộ `wordchain` cung cấp:
+
+| Placeholder | Giá trị |
+| --- | --- |
+| `%wordchain_active%` | Ván công khai có đang chạy không |
+| `%wordchain_word%` hoặc `%wordchain_keyword%` | Từ khóa hiện tại |
+| `%wordchain_moves%` | Số lượt hợp lệ hiện tại |
+| `%wordchain_dictionary_size%` | Số cụm từ trong từ điển runtime |
+
+## API cho plugin khác
+
+Plugin đăng ký `WordChainApi` qua Bukkit ServicesManager. API phát `WordChainMoveEvent` và `WordChainWinEvent`; các thao tác đọc dữ liệu SQLite trả về `CompletionStage` để tránh chặn luồng server.
+
+## Lưu trữ và hiệu năng
+
+Từ điển runtime, cache nguồn và thống kê được lưu trong `plugins/WordChain/wordchain.db`. Nạp/nhập từ điển và truy vấn dữ liệu bất đồng bộ; xử lý chat chuyển cập nhật thế giới và người chơi về main thread. Các lượt chat chỉ được đưa vào xử lý khi có dạng hai âm tiết phù hợp.
+
+Phiên bản hiện tại dùng SQLite cục bộ cho từng server. Redis Pub/Sub, MySQL và đồng bộ ván/bảng xếp hạng xuyên server chưa được triển khai; chạy sau Velocity/BungeeCord không tự tạo trạng thái game chung.
+
+## Giấy phép và dữ liệu
+
+Mã nguồn plugin được phát hành theo MIT; xem [LICENSE](LICENSE). Dữ liệu từ điển là nguồn độc lập và có thể có điều khoản riêng. Đọc điều khoản của nhà cung cấp trước khi nhập hoặc chia sẻ lại dữ liệu đã nhập.

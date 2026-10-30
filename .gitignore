@@ -1,5 +1,6 @@
 # Maven output
 /target/
+/.tools/
 
 # Local development and workspace metadata
 /.idea/
