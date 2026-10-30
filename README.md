@@ -2,7 +2,7 @@
 
 Plugin nối từ tiếng Việt cho Paper, với chế độ chơi công khai và đấu tay đôi, menu GUI, bảng xếp hạng, phần thưởng và từ điển có thể nhập thêm.
 
-> **Yêu cầu hiện tại:** Java 25 và Paper 26.1 trở lên. Maven biên dịch với Paper API 26.3.
+> **Phiên bản:** 1.4.0 · **Yêu cầu:** Java 25 và Paper 26.1 trở lên. Maven biên dịch với Paper API 26.3.
 
 ## Tính năng
 
@@ -18,7 +18,7 @@ Plugin nối từ tiếng Việt cho Paper, với chế độ chơi công khai v
 
 1. Cài Java 25 và Paper 26.1+.
 2. Tải JAR từ mục **Releases**, hoặc tự build theo hướng dẫn bên dưới.
-3. Đặt `word-chain-1.3.1.jar` vào thư mục `plugins/` rồi khởi động máy chủ.
+3. Đặt `word-chain-1.4.0.jar` vào thư mục `plugins/` rồi khởi động máy chủ.
 4. Chỉnh `plugins/WordChain/config.yml`. Sau khi thay đổi, chạy `/wordchain reload`.
 
 SQLite JDBC được khai báo trong `plugin.yml` dưới dạng thư viện Paper tải khi khởi động. Vault và PlaceholderAPI là tùy chọn; cài plugin tương ứng để bật tích hợp.
@@ -29,7 +29,7 @@ SQLite JDBC được khai báo trong `plugin.yml` dưới dạng thư viện Pap
 mvn clean verify
 ```
 
-Lệnh build cần JDK 25 cùng Maven 3.9+. JAR đầu ra: `target/word-chain-1.3.1.jar`.
+Lệnh build cần JDK 25 cùng Maven 3.9+. JAR đầu ra: `target/word-chain-1.4.0.jar`.
 
 ## Lệnh và quyền
 
@@ -39,9 +39,9 @@ Các lệnh có thể dùng qua `/wordchain`, alias `/wc` hoặc `/noitu`.
 | --- | --- | --- |
 | `/wordchain` hoặc `/wordchain menu` | Mở menu trò chơi | `wordchain.menu` |
 | `/wordchain start [cụm-từ]` | Bắt đầu ván công khai | `wordchain.play` |
-| `/wordchain stop` | Dừng ván công khai | `wordchain.play` |
+| `/wordchain stop` | Mở vote dừng ván; admin dừng trực tiếp | `wordchain.play` hoặc `wordchain.admin` |
 | `/wordchain reset` | Đề xuất mở ván công khai mới | `wordchain.play` |
-| `/wordchain vote <yes\|no>` | Bỏ phiếu cho đề xuất reset | `wordchain.vote` |
+| `/wordchain vote <yes\|no>` | Bỏ phiếu cho đề xuất dừng hoặc reset | `wordchain.vote` |
 | `/wordchain duel <người-chơi> [giây\|off]` | Mời đấu tay đôi | `wordchain.duel` |
 | `/wordchain accept` · `/wordchain deny` | Nhận hoặc từ chối lời mời | `wordchain.duel.respond` |
 | `/wordchain top` | Xem bảng xếp hạng thắng | `wordchain.top` |
@@ -55,7 +55,7 @@ Các lệnh có thể dùng qua `/wordchain`, alias `/wc` hoặc `/noitu`.
 | `/wordchain difficulty <âm-đầu> <âm-cuối> <1-5>` | Đặt độ khó cụm từ | `wordchain.admin` |
 | `/wordchain reports`, `/approve`, `/reject` | Quản lý báo cáo từ | `wordchain.admin` |
 
-`wordchain.player` là nhóm quyền mặc định cho người chơi và bao gồm quyền chơi, menu, top, duel, báo từ và vote. `wordchain.admin` mặc định dành cho operator. Có thể đặt `game.members-can-control: false` để chỉ admin được start/stop/reset.
+`wordchain.player` là nhóm quyền mặc định cho người chơi và bao gồm quyền chơi, menu, top, duel, báo từ và vote. `wordchain.admin` mặc định dành cho operator. Khi người chơi dùng `/wordchain stop`, plugin mở vote; ngưỡng đồng ý là ít nhất 1/3 số người chơi online lúc mở vote (làm tròn lên), người đề xuất không được tự bỏ phiếu và vote hết hạn theo `game.reset-vote-seconds`. Admin có thể dùng cùng lệnh để dừng ván ngay. Có thể đặt `game.members-can-control: false` để chỉ admin được start/stop/reset.
 
 ## Cấu hình
 

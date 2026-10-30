@@ -61,8 +61,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private RewardService rewardService;
     private DisplayService displayService;
     private org.bukkit.scheduler.BukkitTask nextMatchTask;
-    private org.bukkit.scheduler.BukkitTask resetVoteTask;
-    private ResetVote resetVote;
+    private org.bukkit.scheduler.BukkitTask gameVoteTask;
+    private GameVote gameVote;
     private Connection connection;
     private String databaseUrl;
     private WordGame game;
@@ -177,6 +177,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.broadcast(message("<green>" + escape(playerName) + " nối thành công: <yellow>" + escape(clean) + "</yellow>. Tiếng tiếp theo: <gold>" + escape(game.requiredSyllable()) + "</gold>.</green>"));
         Bukkit.getPluginManager().callEvent(new WordChainMoveEvent(id, playerName, clean));
         if (game.getMoves() >= getConfig().getInt("game.target-moves", 10)) {
+            cancelGameVote("<yellow>Đề xuất đã bị hủy vì ván vừa kết thúc.");
             game.stop();
             saveWin(id, playerName, true, false, null);
             Bukkit.broadcast(message("<gold><bold>" + escape(playerName) + " đã chiến thắng trò Nối Từ!"));
@@ -188,7 +189,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     private void resetPublicRound() {
         String next = randomStartingWord();
-        if (next == null) { game.stop(); Bukkit.broadcast(message("<yellow>Ván đã được đặt lại vì không còn nước nối hợp lệ; chưa có từ mở màn phù hợp.")); }
+        if (next == null) { cancelGameVote("<yellow>Đề xuất đã bị hủy vì ván vừa kết thúc."); game.stop(); Bukkit.broadcast(message("<yellow>Ván đã được đặt lại vì không còn nước nối hợp lệ; chưa có từ mở màn phù hợp.")); }
         else { rememberStartingWord(next); game.start(next); Bukkit.broadcast(message("<yellow>Không còn nước nối hợp lệ. Ván mới bắt đầu với từ khóa ngẫu nhiên: <gold>" + escape(next) + "</gold>.")); announcePublicJoin(next); }
     }
 
@@ -214,13 +215,13 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 if (game.isActive()) { sender.sendMessage(message("<yellow>Ván đang diễn ra. Dùng /wordchain reset để bắt đầu lại.")); return true; }
                 String start = args.length > 1 ? normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))) : randomStartingWord();
                 if (start == null || !isTwoSyllablePhrase(start) || !isValidWord(start) || !hasContinuation(start, Map.of(start, 1), initialHardRun(start))) { sender.sendMessage(message("<red>Không có từ mở màn phù hợp. Hãy nạp thêm dữ liệu từ điển.")); return true; }
-                cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì ván mới được bắt đầu.");
+                cancelGameVote("<yellow>Đề xuất đã bị hủy vì ván mới được bắt đầu.");
                 rememberStartingWord(start);
                 cancelNextMatch(); publicParticipants.clear(); game.start(start); if (sender instanceof Player starter) publicParticipants.add(starter.getUniqueId()); announcePublicJoin(start);
             }
-            case "stop" -> { if (!canControl(sender)) return deny(sender); cancelResetVote("<yellow>Đề xuất đặt lại đã bị hủy vì trò chơi đã dừng."); cancelNextMatch(); game.stop(); publicParticipants.clear(); Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng.")); }
+            case "stop" -> { if (!canControl(sender)) return deny(sender); if (sender.hasPermission("wordchain.admin")) stopPublicGame(sender.getName()); else requestPublicStop(sender); }
             case "reset" -> { if (!canControl(sender)) return deny(sender); if (!dictionaryReady || importRunning.get()) { sender.sendMessage(message("<yellow>Đang nạp từ điển, vui lòng thử lại sau.")); return true; } requestPublicReset(sender); }
-            case "vote" -> { if (!sender.hasPermission("wordchain.vote")) return deny(sender); castResetVote(sender, args); }
+            case "vote" -> { if (!sender.hasPermission("wordchain.vote")) return deny(sender); castGameVote(sender, args); }
             case "menu" -> { if (!sender.hasPermission("wordchain.menu")) return deny(sender); if (sender instanceof Player p) openMenu(p); else sender.sendMessage("Lệnh này chỉ dành cho người chơi."); }
             case "top" -> { if (!sender.hasPermission("wordchain.top")) return deny(sender); showTop(sender); }
             case "wins" -> { if (!(sender.hasPermission("wordchain.admin") || sender.hasPermission("wordchain.stats"))) return deny(sender); if (args.length != 2) { sender.sendMessage(message("<yellow>Dùng: /wordchain wins <player>")); return true; } showPlayerStats(sender, args[1]); }
@@ -935,8 +936,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             startFreshPublicGame(sender.getName());
             return;
         }
-        if (resetVote != null) {
-            player.sendMessage(message("<yellow>Đang có đề xuất đặt lại từ " + escape(resetVote.requesterName()) + "."));
+        if (gameVote != null) {
+            player.sendMessage(message("<yellow>Đang có đề xuất " + voteActionName(gameVote.action()) + " từ " + escape(gameVote.requesterName()) + "."));
             return;
         }
         Set<UUID> online = new HashSet<>();
@@ -945,37 +946,69 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             player.sendMessage(message("<red>Cần ít nhất hai người chơi online để bỏ phiếu đặt lại."));
             return;
         }
-        resetVote = new ResetVote(player.getUniqueId(), player.getName(), online);
-        int timeout = Math.max(5, Math.min(120, getConfig().getInt("game.reset-vote-seconds", 30)));
-        ResetVote proposal = resetVote;
-        resetVoteTask = Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (resetVote != proposal) return;
-            clearResetVote();
-            Bukkit.broadcast(message("<yellow>Đề xuất đặt lại của " + escape(proposal.requesterName()) + " đã hết hạn vì chưa đủ phiếu."));
+        gameVote = new GameVote(GameVote.Action.RESET, player.getUniqueId(), player.getName(), online);
+        int timeout = voteTimeoutSeconds();
+        GameVote proposal = gameVote;
+        gameVoteTask = Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (gameVote != proposal) return;
+            clearGameVote();
+            Bukkit.broadcast(message("<yellow>Đề xuất " + voteActionName(proposal.action()) + " của " + escape(proposal.requesterName()) + " đã hết hạn vì chưa đủ phiếu."));
         }, timeout * 20L);
         Bukkit.broadcast(message("<gold>" + escape(player.getName()) + " đề xuất bắt đầu ván mới với từ khóa ngẫu nhiên. Người chơi khác dùng <yellow>/wordchain vote yes</yellow> hoặc <yellow>/wordchain vote no</yellow>. Cần " + proposal.requiredVotes() + " phiếu (ít nhất 1/3 người chơi đang online) trong " + timeout + " giây."));
     }
 
-    private void castResetVote(CommandSender sender, String[] args) {
+    private void requestPublicStop(CommandSender sender) {
+        if (!game.isActive()) { sender.sendMessage(message("<yellow>Hiện không có ván công khai nào đang diễn ra.")); return; }
+        if (!(sender instanceof Player player)) { sender.sendMessage(message("<red>Chỉ người chơi mới có thể mở phiếu dừng; admin có thể dừng trực tiếp.")); return; }
+        if (gameVote != null) { player.sendMessage(message("<yellow>Đang có đề xuất " + voteActionName(gameVote.action()) + " từ " + escape(gameVote.requesterName()) + ".")); return; }
+        Set<UUID> online = new HashSet<>();
+        Bukkit.getOnlinePlayers().forEach(onlinePlayer -> online.add(onlinePlayer.getUniqueId()));
+        if (online.size() < 2) { player.sendMessage(message("<red>Cần ít nhất hai người chơi online để bỏ phiếu dừng ván.")); return; }
+        gameVote = new GameVote(GameVote.Action.STOP, player.getUniqueId(), player.getName(), online);
+        int timeout = voteTimeoutSeconds();
+        GameVote proposal = gameVote;
+        gameVoteTask = Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (gameVote != proposal) return;
+            clearGameVote();
+            Bukkit.broadcast(message("<yellow>Đề xuất dừng ván của " + escape(proposal.requesterName()) + " đã hết hạn vì chưa đủ phiếu."));
+        }, timeout * 20L);
+        Bukkit.broadcast(message("<gold>" + escape(player.getName()) + " đề xuất dừng ván Nối Từ. Người chơi khác dùng <yellow>/wordchain vote yes</yellow> hoặc <yellow>/wordchain vote no</yellow>. Cần " + proposal.requiredVotes() + " phiếu đồng ý (ít nhất 1/3 người chơi online) trong " + timeout + " giây. Admin có thể dùng /wordchain stop để dừng ngay."));
+    }
+
+    private void castGameVote(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) { sender.sendMessage(message("<red>Chỉ người chơi mới bỏ phiếu được.")); return; }
         if (args.length != 2 || !(args[1].equalsIgnoreCase("yes") || args[1].equalsIgnoreCase("no"))) { sender.sendMessage(message("<yellow>Dùng: /wordchain vote <yes|no>")); return; }
-        ResetVote proposal = resetVote;
-        if (proposal == null) { player.sendMessage(message("<yellow>Hiện không có đề xuất đặt lại nào.")); return; }
-        ResetVote.Result result = proposal.cast(player.getUniqueId(), args[1].equalsIgnoreCase("yes"));
+        GameVote proposal = gameVote;
+        if (proposal == null) { player.sendMessage(message("<yellow>Hiện không có đề xuất nào cần bỏ phiếu.")); return; }
+        GameVote.Result result = proposal.cast(player.getUniqueId(), args[1].equalsIgnoreCase("yes"));
+        String action = voteActionName(proposal.action());
         switch (result) {
             case INELIGIBLE -> player.sendMessage(message("<red>Người đề xuất không thể tự bỏ phiếu; chỉ người chơi đang online lúc mở phiếu được bỏ phiếu."));
             case DUPLICATE -> player.sendMessage(message("<yellow>Bạn đã bỏ phiếu rồi."));
-            case RECORDED -> Bukkit.broadcast(message("<gray>Phiếu đặt lại: <green>" + proposal.yesVotes() + " đồng ý</green>, <red>" + proposal.noVotes() + " từ chối</red>; cần " + proposal.requiredVotes() + "."));
+            case RECORDED -> Bukkit.broadcast(message("<gray>Phiếu " + action + ": <green>" + proposal.yesVotes() + " đồng ý</green>, <red>" + proposal.noVotes() + " từ chối</red>; cần " + proposal.requiredVotes() + "."));
             case ACCEPTED -> {
-                clearResetVote();
-                Bukkit.broadcast(message("<green>Đề xuất bắt đầu ván mới đã được thông qua."));
-                startFreshPublicGame(proposal.requesterName());
+                clearGameVote();
+                if (proposal.action() == GameVote.Action.RESET) {
+                    Bukkit.broadcast(message("<green>Đề xuất bắt đầu ván mới đã được thông qua."));
+                    startFreshPublicGame(proposal.requesterName());
+                } else stopPublicGame(proposal.requesterName());
             }
             case REJECTED -> {
-                clearResetVote();
-                Bukkit.broadcast(message("<yellow>Đề xuất bắt đầu ván mới đã bị từ chối."));
+                clearGameVote();
+                Bukkit.broadcast(message("<yellow>Đề xuất " + action + " đã bị từ chối."));
             }
         }
+    }
+
+    private int voteTimeoutSeconds() { return Math.max(5, Math.min(120, getConfig().getInt("game.reset-vote-seconds", 30))); }
+    private String voteActionName(GameVote.Action action) { return action == GameVote.Action.RESET ? "đặt lại ván" : "dừng ván"; }
+
+    private void stopPublicGame(String requesterName) {
+        cancelGameVote("<yellow>Đề xuất đã bị hủy vì admin dừng ván.");
+        cancelNextMatch();
+        game.stop();
+        publicParticipants.clear();
+        Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng bởi " + escape(requesterName) + "."));
     }
 
     private void startFreshPublicGame(String requesterName) {
@@ -988,15 +1021,15 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         announcePublicJoin(start);
     }
 
-    private void clearResetVote() {
-        if (resetVoteTask != null) resetVoteTask.cancel();
-        resetVoteTask = null;
-        resetVote = null;
+    private void clearGameVote() {
+        if (gameVoteTask != null) gameVoteTask.cancel();
+        gameVoteTask = null;
+        gameVote = null;
     }
 
-    private void cancelResetVote(String reason) {
-        if (resetVote == null) return;
-        clearResetVote();
+    private void cancelGameVote(String reason) {
+        if (gameVote == null) return;
+        clearGameVote();
         Bukkit.broadcast(message(reason));
     }
 
@@ -1025,6 +1058,6 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             used.merge(phrase,1,Integer::sum); lastWord = phrase; moves++; return true;
         }
     }
-    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);ResetVote vote=resetVote;if(vote!=null&&vote.requester().equals(id))cancelResetVote("<yellow>Đề xuất ván mới bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);GameVote vote=gameVote;if(vote!=null&&vote.requester().equals(id))cancelGameVote("<yellow>Đề xuất " + voteActionName(vote.action()) + " bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
     @EventHandler public void onJoin(PlayerJoinEvent event) { if (displayService != null) displayService.showTo(event.getPlayer()); }
 }

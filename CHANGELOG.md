@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+- Changed `/wordchain stop` for regular players to a public vote using the existing one-third quorum and timeout; admins can stop immediately.
+- Unified stop/reset proposals under a shared vote model and cancel pending votes safely when a round changes or its requester leaves.
+- Updated the release workflow and plugin metadata for Java 25 / Paper 26 builds.
+
 ## 1.3.1
 - Added a streaming JSON-array importer for the Vietnamese-dictionary-api `text` entries and enabled its 3.9 MB source by default.
 - Existing installations add the source once through a config migration; admins can then remove it to opt out.

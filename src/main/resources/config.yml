@@ -1,10 +1,11 @@
 game:
   target-moves: 10
-  # Players can use start/stop/reset by default; set false to restrict controls to admins.
+  # Players can start/reset and propose stopping by default; admins can always stop immediately.
   members-can-control: true
   max-phrase-length: 48
   next-match-delay-seconds: 5
   recent-start-limit: 20
+  # Shared expiry for public stop/reset votes (clamped to 5-120 seconds).
   reset-vote-seconds: 30
 rewards:
   # Bukkit material names and positive integer amounts. Invalid entries are skipped with a warning.

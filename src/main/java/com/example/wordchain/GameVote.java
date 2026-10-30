@@ -6,17 +6,20 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** Tracks one public reset proposal. All voters are captured when the proposal starts. */
-final class ResetVote {
+/** One public yes/no proposal. Eligible voters are snapshotted when voting starts. */
+final class GameVote {
+    enum Action { RESET, STOP }
     enum Result { ACCEPTED, REJECTED, RECORDED, DUPLICATE, INELIGIBLE }
 
+    private final Action action;
     private final UUID requester;
     private final String requesterName;
     private final Set<UUID> eligibleVoters;
     private final Map<UUID, Boolean> votes = new HashMap<>();
     private final int requiredVotes;
 
-    ResetVote(UUID requester, String requesterName, Set<UUID> onlinePlayers) {
+    GameVote(Action action, UUID requester, String requesterName, Set<UUID> onlinePlayers) {
+        this.action = action;
         this.requester = requester;
         this.requesterName = requesterName;
         this.eligibleVoters = new HashSet<>(onlinePlayers);
@@ -37,10 +40,10 @@ final class ResetVote {
         return (int) votes.values().stream().filter(vote -> vote == accepted).count();
     }
 
+    Action action() { return action; }
     UUID requester() { return requester; }
     String requesterName() { return requesterName; }
     int yesVotes() { return count(true); }
     int noVotes() { return count(false); }
     int requiredVotes() { return requiredVotes; }
-    int eligibleVoters() { return eligibleVoters.size(); }
 }
