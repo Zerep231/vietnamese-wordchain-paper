@@ -62,6 +62,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private RewardService rewardService;
     private DisplayService displayService;
     private org.bukkit.scheduler.BukkitTask nextMatchTask;
+    private org.bukkit.scheduler.BukkitTask publicIdleTask;
     private org.bukkit.scheduler.BukkitTask gameVoteTask;
     private GameVote gameVote;
     private Connection connection;
@@ -127,10 +128,13 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (!getConfig().contains("game.recent-start-limit")) { getConfig().set("game.recent-start-limit", 20); changed = true; }
         if (!getConfig().contains("game.reset-vote-seconds")) { getConfig().set("game.reset-vote-seconds", 30); changed = true; }
         if (!getConfig().contains("duel.max-wager")) { getConfig().set("duel.max-wager", 1_000_000); changed = true; }
+        if (!getConfig().contains("game.idle-timeout-minutes")) { getConfig().set("game.idle-timeout-minutes", 15); changed = true; }
+        if (!getConfig().contains("duel.default-stake-type")) { getConfig().set("duel.default-stake-type", "auto"); changed = true; }
         if (changed) saveConfig();
     }
 
     @Override public void onDisable() {
+        cancelPublicIdleTimeout();
         for (DuelMatch match : new HashSet<>(duels.values())) {
             finishDuel(match, null, "Máy chủ đang tắt; duel đã dừng.");
         }
@@ -181,6 +185,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         }
         if (!game.tryMove(raw, this::isValidWord)) { if (!game.hasLegalContinuation()) resetPublicRound(); else notifyInvalidMove(id, raw); return; }
         game.recordPlayer(id, System.currentTimeMillis());
+        armPublicIdleTimeout();
         displayService.start(game.getLastWord(), game.getMoves());
         String clean = raw;
         Bukkit.broadcast(message("<green>" + escape(playerName) + " nối thành công: <yellow>" + escape(clean) + "</yellow>. Tiếng tiếp theo: <gold>" + escape(game.requiredSyllable()) + "</gold>.</green>"));
@@ -215,6 +220,40 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (joined) Bukkit.broadcast(message("<gray>» <yellow>" + escape(player.getName()) + "</yellow> đã tham gia ván."));
     }
 
+    private void leavePublicGame(Player player) {
+        UUID id = player.getUniqueId();
+        if (!publicParticipants.remove(id)) {
+            player.sendMessage(message("<yellow>Bạn chưa tham gia ván công khai."));
+            return;
+        }
+        if (id.equals(game.getLastPlayer())) game.clearLastPlayer(id);
+        player.sendMessage(message("<green>Bạn đã rời ván công khai; chat thường của bạn được giữ nguyên."));
+        Bukkit.broadcast(message("<gray>» <yellow>" + escape(player.getName()) + "</yellow> đã rời ván Nối Từ."));
+    }
+
+    private void armPublicIdleTimeout() {
+        if (publicIdleTask != null) publicIdleTask.cancel();
+        long minutes = Math.max(1, Math.min(1440, getConfig().getLong("game.idle-timeout-minutes", 15)));
+        publicIdleTask = Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!game.isActive()) return;
+            UUID lastPlayer = game.getLastPlayer();
+            String lastName = lastPlayer == null ? null : Bukkit.getOfflinePlayer(lastPlayer).getName();
+            game.stop();
+            publicParticipants.clear();
+            if (lastPlayer != null && lastName != null) {
+                saveWin(lastPlayer, lastName, true, false, null);
+                Bukkit.broadcast(message("<gold>Ván công khai tự kết thúc vì không có lượt nối trong " + minutes
+                        + " phút. Người nối cuối cùng, <yellow>" + escape(lastName) + "</yellow>, thắng ván!"));
+            } else {
+                Bukkit.broadcast(message("<yellow>Ván công khai đã hủy vì không có ai nối từ trong " + minutes + " phút."));
+            }
+        }, minutes * 60L * 20L);
+    }
+
+    private void cancelPublicIdleTimeout() {
+        if (publicIdleTask != null) { publicIdleTask.cancel(); publicIdleTask = null; }
+    }
+
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         String sub = args.length == 0 ? "menu" : args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
@@ -240,6 +279,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             case "duel" -> { if (!sender.hasPermission("wordchain.duel")) return deny(sender); createDuelInvite(sender,args); }
             case "accept" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); acceptDuel(sender,args); }
             case "join" -> { if (!(sender instanceof Player player) || !player.hasPermission("wordchain.play")) return deny(sender); joinPublicGame(player); }
+            case "leave" -> { if (!(sender instanceof Player player)) { sender.sendMessage("Only players can leave a game."); return true; } leavePublicGame(player); }
             case "deny" -> { if (!sender.hasPermission("wordchain.duel.respond")) return deny(sender); denyDuel(sender,args); }
             case "add" -> { if (!sender.hasPermission("wordchain.admin")) return deny(sender); if (args.length < 2) { sender.sendMessage(message("<yellow>Dùng: /noitu add <từ gồm hai tiếng>")); return true; } String phrase = normalizePhrase(String.join(" ", Arrays.copyOfRange(args, 1, args.length))); addWordAsync(sender, phrase); }
             case "report" -> { if (!sender.hasPermission("wordchain.report")) return deny(sender); reportWord(sender, args); }
@@ -703,8 +743,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
 
     private void createDuelInvite(CommandSender sender, String[] args) {
         if (!(sender instanceof Player challenger)) { sender.sendMessage("Only players can challenge a duel."); return; }
-        if (args.length < 2 || args.length > 4) {
-            sender.sendMessage(message("<yellow>/wordchain duel <player> [seconds|off] [wager|0]"));
+        if (args.length != 5 && args.length != 4) {
+            sender.sendMessage(message("<yellow>/wordchain duel <player> <seconds|off> <vault|MATERIAL> <amount>"));
             return;
         }
         Player target = Bukkit.getPlayerExact(args[1]);
@@ -712,42 +752,49 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             sender.sendMessage(message("<red>Người chơi không hợp lệ hoặc đang đấu."));
             return;
         }
-
-        int seconds = getConfig().getInt("duel.default-connect-seconds", 30);
-        if (args.length >= 3) {
-            if (args[2].equalsIgnoreCase("off")) seconds = 0;
-            else try { seconds = Integer.parseInt(args[2]); }
-            catch (NumberFormatException e) { sender.sendMessage(message("<red>Thời gian phải là số giây hoặc off.")); return; }
-        }
+        int seconds;
+        if (args[2].equalsIgnoreCase("off")) seconds = 0;
+        else try { seconds = Integer.parseInt(args[2]); }
+        catch (NumberFormatException e) { sender.sendMessage(message("<red>Thời gian phải là số giây hoặc off.")); return; }
         if (seconds != 0 && (seconds < 5 || seconds > 300)) {
-            sender.sendMessage(message("<red>Thời gian kết nối hợp lệ: off hoặc 5-300 giây."));
-            return;
+            sender.sendMessage(message("<red>Thời gian kết nối hợp lệ: off hoặc 5-300 giây.")); return;
         }
-
-        double wager = 0;
-        if (args.length == 4) {
-            try { wager = Double.parseDouble(args[3]); }
-            catch (NumberFormatException e) { sender.sendMessage(message("<red>Mức cược phải là số hợp lệ hoặc 0.")); return; }
+        String stakeType = args.length == 4 ? "vault" : args[3].toLowerCase(Locale.ROOT);
+        String stakeText = args.length == 4 ? args[3] : args[4];
+        double stake;
+        try { stake = Double.parseDouble(stakeText); }
+        catch (NumberFormatException e) { sender.sendMessage(message("<red>Số cược phải là số hợp lệ; dùng 0 để đấu vui.")); return; }
+        if (!Double.isFinite(stake) || stake < 0) { sender.sendMessage(message("<red>Số cược không hợp lệ.")); return; }
+        if (stakeType.equals("auto")) {
+            String configuredType = getConfig().getString("duel.default-stake-type", "auto");
+            stakeType = configuredType == null || configuredType.equalsIgnoreCase("auto")
+                    ? (rewardService.isEconomyAvailable() ? "vault" : getConfig().getString("duel.fallback-item", "DIAMOND").toLowerCase(Locale.ROOT))
+                    : configuredType.toLowerCase(Locale.ROOT);
         }
-        double configuredMax = getConfig().getDouble("duel.max-wager", 1_000_000);
-        double maxWager = Double.isFinite(configuredMax)
-                ? Math.min(Double.MAX_VALUE / 2, Math.max(0, configuredMax)) : 1_000_000;
-        if (!GameplayRules.isValidWager(wager, maxWager)) {
-            sender.sendMessage(message("<red>Mức cược hợp lệ: 0 đến " + formatMoney(maxWager) + "."));
-            return;
+        if (!stakeType.equals("vault")) {
+            Material selected = Material.matchMaterial(stakeType);
+            if (selected == null || !selected.isItem() || selected.isAir()) {
+                sender.sendMessage(message("<red>Loại cược phải là vault hoặc tên vật phẩm Bukkit hợp lệ.")); return;
+            }
+            stakeType = selected.name().toLowerCase(Locale.ROOT);
         }
-        if (wager > 0 && !rewardService.isEconomyAvailable()) {
-            sender.sendMessage(message("<red>Cần cài Vault cùng plugin economy để mở duel có cược."));
-            return;
+        if (stake > 0 && stakeType.equals("vault")) {
+            double max = Math.min(Double.MAX_VALUE / 2, Math.max(0, getConfig().getDouble("duel.max-wager", 1_000_000)));
+            if (!GameplayRules.isValidWager(stake, max) || !rewardService.isEconomyAvailable()) {
+                sender.sendMessage(message("<red>Cược Vault không hợp lệ hoặc Vault/economy chưa sẵn sàng.")); return;
+            }
+            if (!rewardService.hasFunds(challenger.getUniqueId(), stake)) { sender.sendMessage(message("<red>Bạn không đủ số dư Vault.")); return; }
+        } else if (stake > 0) {
+            Material material = Material.matchMaterial(stakeType);
+            int max = Math.max(0, Math.min(Integer.MAX_VALUE / 2, getConfig().getInt("duel.max-item-stake", 64)));
+            if (material == null || !material.isItem() || material.isAir() || stake != Math.rint(stake) || stake > max
+                    || !hasItem(challenger, material, (int) stake)) {
+                sender.sendMessage(message("<red>Vật cược phải là material hợp lệ, số nguyên tối đa " + max + ", và bạn phải có đủ vật phẩm.")); return;
+            }
         }
-        if (wager > 0 && !rewardService.hasFunds(challenger.getUniqueId(), wager)) {
-            sender.sendMessage(message("<red>Bạn không đủ tiền để chọn mức cược này."));
-            return;
-        }
-
-        DuelInvite invite = new DuelInvite(challenger.getUniqueId(), challenger.getName(), target.getUniqueId(), seconds, wager);
+        DuelInvite invite = new DuelInvite(challenger.getUniqueId(), challenger.getName(), target.getUniqueId(), seconds, stakeType, stake);
         duelInvites.put(target.getUniqueId(), invite);
-        String wagerText = wager == 0 ? "đấu vui, không cược" : "mỗi bên cược " + formatMoney(wager);
+        String wagerText = stake == 0 ? "đấu vui, không cược" : "mỗi bên cược " + formatStake(stakeType, stake);
         String turnText = seconds == 0 ? "không giới hạn" : seconds + " giây";
         target.sendMessage(message("<gold>" + escape(challenger.getName()) + " mời bạn đấu Nối Từ (" + wagerText
                 + "). Dùng <yellow>/wordchain accept</yellow> để đồng ý mức cược hoặc <yellow>/wordchain deny</yellow> để từ chối. Thời gian nối: " + turnText + "."));
@@ -771,30 +818,24 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (start == null) { sender.sendMessage(message("<red>Từ điển chưa có từ mở màn khả dụng.")); return; }
 
         boolean escrowed = false;
-        if (invite.wager() > 0) {
-            if (!rewardService.isEconomyAvailable()) {
-                duelInvites.remove(receiver.getUniqueId(), invite);
-                sender.sendMessage(message("<red>Economy không còn khả dụng; duel cược đã bị hủy."));
-                return;
+        if (invite.stake() > 0) {
+            Material item = invite.stakeType().equals("vault") ? null : Material.matchMaterial(invite.stakeType());
+            if (item == null && invite.stakeType().equals("vault")) {
+                if (!rewardService.isEconomyAvailable() || !rewardService.hasFunds(invite.challenger(), invite.stake())
+                        || !rewardService.hasFunds(receiver.getUniqueId(), invite.stake())) {
+                    cancelDuelInvite(receiver, challenger, invite, "<red>Vault/economy không sẵn sàng hoặc một bên không đủ tiền; duel bị hủy.", "<yellow>Không thể giữ đủ tiền cược; duel đã bị hủy."); return;
+                }
+            } else if (item == null || !hasItem(challenger, item, (int) invite.stake()) || !hasItem(receiver, item, (int) invite.stake())) {
+                cancelDuelInvite(receiver, challenger, invite, "<red>Một bên không đủ vật phẩm cược; duel bị hủy.", "<yellow>Bạn hoặc đối thủ không đủ vật phẩm cược."); return;
             }
-            if (!rewardService.hasFunds(invite.challenger(), invite.wager())) {
-                cancelDuelInvite(receiver, challenger, invite, "<red>Người thách đấu không đủ tiền; lời mời đã bị hủy.", "<red>Bạn không đủ tiền để giữ mức cược đã chọn.");
-                return;
+            if (!withdrawStake(challenger, invite.stakeType(), invite.stake())) {
+                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ cược từ người thách đấu.", "<yellow>Không thể giữ cược; duel đã bị hủy."); return;
             }
-            if (!rewardService.hasFunds(receiver.getUniqueId(), invite.wager())) {
-                cancelDuelInvite(receiver, challenger, invite, "<red>Bạn không đủ tiền để nhận mức cược này.", "<yellow>Đối thủ không đủ tiền cho mức cược; lời mời đã bị hủy.");
-                return;
-            }
-            if (!rewardService.withdrawWager(invite.challenger(), invite.wager())) {
-                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ tiền cược từ người thách đấu.", "<yellow>Không thể giữ tiền cược; duel đã bị hủy.");
-                return;
-            }
-            if (!rewardService.withdrawWager(receiver.getUniqueId(), invite.wager())) {
-                boolean refunded = rewardService.depositWager(invite.challenger(), invite.wager());
-                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ tiền cược từ bạn.", refunded
-                        ? "<yellow>Không thể bắt đầu cược; tiền của bạn đã được hoàn lại."
-                        : "<red>Không thể hoàn tiền tự động. Hãy báo admin kiểm tra economy.");
-                return;
+            if (!withdrawStake(receiver, invite.stakeType(), invite.stake())) {
+                boolean refunded = depositStake(challenger.getUniqueId(), invite.stakeType(), invite.stake());
+                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ cược từ bạn.</red>", refunded
+                        ? "<yellow>Không thể bắt đầu cược; tài sản của bạn đã được hoàn lại."
+                        : "<red>Không thể hoàn tài sản tự động. Hãy báo admin.</red>"); return;
             }
             escrowed = true;
         }
@@ -802,15 +843,15 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         duelInvites.remove(receiver.getUniqueId(), invite);
         rememberStartingWord(start);
         DuelMatch match = new DuelMatch(challenger.getUniqueId(), challenger.getName(), receiver.getUniqueId(),
-                receiver.getName(), invite.connectSeconds(), start, invite.wager(), escrowed);
+                receiver.getName(), invite.connectSeconds(), start, invite.stakeType(), invite.stake(), escrowed);
         duels.put(challenger.getUniqueId(), match);
         duels.put(receiver.getUniqueId(), match);
         long maxTicks = Math.max(60, Math.min(3600, getConfig().getLong("duel.max-match-seconds", 3600))) * 20L;
         match.maxTask = Bukkit.getScheduler().runTaskLater(this,
                 () -> finishDuel(match, null, "Trận đấu tự dừng sau một giờ."), maxTicks).getTaskId();
         armDuelTurn(match);
-        String wagerText = invite.wager() == 0 ? "Trận đấu này không cược."
-                : "Mỗi bên đã cược " + formatMoney(invite.wager()) + "; người thắng nhận tổng " + formatMoney(invite.wager() * 2) + ".";
+        String wagerText = invite.stake() == 0 ? "Trận đấu này không cược."
+                : "Mỗi bên đã cược " + formatStake(invite.stakeType(), invite.stake()) + "; người thắng nhận gấp đôi.";
         sendDuelMessage(match, "<gold>Đấu bắt đầu! <yellow>" + escape(challenger.getName()) + "</yellow> đấu với <yellow>"
                 + escape(receiver.getName()) + "</yellow>. " + escape(wagerText) + " Từ khóa: <aqua>" + escape(start)
                 + "</aqua>. Lượt đầu: " + escape(challenger.getName()) + ".");
@@ -864,22 +905,67 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (!match.wagerEscrowed) return "";
         match.wagerEscrowed = false;
         if (winner == null) {
-            boolean firstRefund = rewardService.depositWager(match.first, match.wager);
-            boolean secondRefund = rewardService.depositWager(match.second, match.wager);
-            if (firstRefund && secondRefund) return " Tiền cược đã được hoàn lại.";
-            getLogger().severe("Could not refund full duel escrow " + formatMoney(match.wager) + " for " + match.first + " and " + match.second);
-            return " <red>Không hoàn đủ tiền cược; hãy báo admin kiểm tra economy.</red>";
+            boolean firstRefund = depositStake(match.first, match.stakeType, match.stake);
+            boolean secondRefund = depositStake(match.second, match.stakeType, match.stake);
+            if (firstRefund && secondRefund) return " Tài sản cược đã được hoàn lại.";
+            getLogger().severe("Could not refund duel escrow " + formatStake(match.stakeType, match.stake) + " for " + match.first + " and " + match.second);
+            return " <red>Không hoàn đủ cược; hãy báo admin kiểm tra.</red>";
         }
-        double pot = match.wager * 2;
-        if (rewardService.depositWager(winner, pot)) return " Người thắng nhận " + formatMoney(pot) + ".";
-        getLogger().severe("Could not pay duel escrow " + formatMoney(pot) + " to " + winner);
-        return " <red>Không trả được tiền cược; hãy báo admin kiểm tra economy.</red>";
+        if (depositStake(winner, match.stakeType, match.stake * 2)) return " Người thắng nhận " + formatStake(match.stakeType, match.stake * 2) + ".";
+        getLogger().severe("Could not pay duel escrow " + formatStake(match.stakeType, match.stake) + " to " + winner);
+        return " <red>Không trả được cược; hãy báo admin kiểm tra.</red>";
     }
+
+    private boolean hasItem(Player player, Material material, int amount) {
+        int count = 0;
+        for (ItemStack stack : player.getInventory().getStorageContents())
+            if (stack != null && stack.getType() == material) count += stack.getAmount();
+        return count >= amount;
+    }
+
+    private boolean withdrawStake(Player player, String type, double amount) {
+        if (type.equals("vault")) return rewardService.withdrawWager(player.getUniqueId(), amount);
+        Material material = Material.matchMaterial(type);
+        if (material == null || amount != Math.rint(amount) || !hasItem(player, material, (int) amount)) return false;
+        int remaining = (int) amount;
+        ItemStack[] contents = player.getInventory().getStorageContents();
+        for (int i = 0; i < contents.length && remaining > 0; i++) {
+            ItemStack stack = contents[i];
+            if (stack == null || stack.getType() != material) continue;
+            int take = Math.min(stack.getAmount(), remaining);
+            remaining -= take;
+            if (take == stack.getAmount()) contents[i] = null;
+            else stack.setAmount(stack.getAmount() - take);
+        }
+        player.getInventory().setStorageContents(contents);
+        return remaining == 0;
+    }
+
+    private boolean depositStake(UUID playerId, String type, double amount) {
+        if (type.equals("vault")) return rewardService.depositWager(playerId, amount);
+        Player player = Bukkit.getPlayer(playerId);
+        Material material = Material.matchMaterial(type);
+        if (player == null || material == null || amount != Math.rint(amount) || amount <= 0) return false;
+        int remaining = (int) amount;
+        while (remaining > 0) {
+            int count = Math.min(remaining, material.getMaxStackSize());
+            ItemStack stack = new ItemStack(material, count);
+            Map<Integer, ItemStack> overflow = player.getInventory().addItem(stack);
+            overflow.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
+            remaining -= count;
+        }
+        return true;
+    }
+
+    private String formatStake(String type, double amount) {
+        return type.equals("vault") ? formatMoney(amount) + " Vault" : ((int) amount) + " " + type.toUpperCase(Locale.ROOT);
+    }
+
     private void sendDuelMessage(DuelMatch match,String text){Component component=message(text);Player first=Bukkit.getPlayer(match.first),second=Bukkit.getPlayer(match.second);if(first!=null)first.sendMessage(component);if(second!=null)second.sendMessage(component);}
     private void notifyDuelError(UUID id,String text){long now=System.currentTimeMillis(),last=wrongMoveNotice.getOrDefault(id,0L);if(now-last<1500)return;wrongMoveNotice.put(id,now);Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message(text));}
 
-    private record DuelInvite(UUID challenger,String challengerName,UUID target,int connectSeconds,double wager){}
-    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final double wager;final Map<String,Integer> uses=new HashMap<>();String last,previous="";UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true,wagerEscrowed;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start,double wager,boolean escrowed){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;this.wager=wager;wagerEscrowed=escrowed;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
+    private record DuelInvite(UUID challenger,String challengerName,UUID target,int connectSeconds,String stakeType,double stake){}
+    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final String stakeType;final double stake;final Map<String,Integer> uses=new HashMap<>();String last,previous="";UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true,wagerEscrowed;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start,String stakeType,double stake,boolean escrowed){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;this.stakeType=stakeType;this.stake=stake;wagerEscrowed=escrowed;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
     private static String formatMoney(double amount){return String.format(Locale.ROOT,"%.2f",amount);}
     private void showTop(CommandSender sender) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
@@ -946,7 +1032,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     boolean placeholderInDuel(UUID playerId) { return playerId != null && duels.containsKey(playerId); }
     String placeholderDuelWager(UUID playerId) {
         DuelMatch match = playerId == null ? null : duels.get(playerId);
-        return match == null ? "0" : formatMoney(match.wager);
+        return match == null || match.stake == 0 ? "0" : formatStake(match.stakeType, match.stake);
     }
 
     private void openPlayerMenu(Player player) {
@@ -1006,7 +1092,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             if (wager == null) return;
             if (target == null) { p.sendMessage(message("<yellow>Người chơi vừa offline.")); openDuelMenu(p); return; }
             p.closeInventory();
-            createDuelInvite(p, new String[]{"duel", target.getName(), Integer.toString(getConfig().getInt("duel.default-connect-seconds", 30)), wager});
+            String[] selectedStake = wager.split(" ", 2);
+            createDuelInvite(p, new String[]{"duel", target.getName(), Integer.toString(getConfig().getInt("duel.default-connect-seconds", 30)), selectedStake[0], selectedStake[1]});
             return;
         }
         switch (e.getRawSlot()) { case 10 -> p.performCommand("wordchain start"); case 12 -> p.performCommand("wordchain stop"); case 14 -> p.performCommand("wordchain reset"); case 16 -> p.performCommand("wordchain top"); case 20 -> p.performCommand("wordchain accept"); case 24 -> openDuelMenu(p); case 29 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain import"); } case 31 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reports"); } case 33 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reload"); } case 37 -> { if (hasRewardPermission(p)) openRewardsMenu(p); } case 41 -> { if (hasStatsPermission(p)) openWinsMenu(p); } default -> {} }
@@ -1040,31 +1127,37 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void openDuelWagerMenu(Player challenger, Player target) {
         MenuHolder holder = new MenuHolder(MenuMode.DUEL_WAGER);
         holder.duelTarget = target.getUniqueId().toString();
-        Inventory inventory = Bukkit.createInventory(holder, 27, message("<dark_aqua>Chọn chế độ duel</dark_aqua>"));
+        Inventory inventory = Bukkit.createInventory(holder, 27, message("<dark_aqua>Choose duel stake</dark_aqua>"));
         holder.inventory = inventory;
-        holder.targets.put(11, "0");
-        put(inventory, 11, Material.PAPER, "<green>Đấu vui, không cược", "<gray>Không dùng economy.", "<gray>Nhấn để gửi lời mời.");
-        double configuredMaxWager = getConfig().getDouble("duel.max-wager", 1_000_000);
-        double maxWager = Double.isFinite(configuredMaxWager)
-                ? Math.min(Double.MAX_VALUE / 2, Math.max(0, configuredMaxWager)) : 1_000_000;
-        boolean hasWagerOption = false;
+        holder.targets.put(11, "auto 0");
+        put(inventory, 11, Material.PAPER, "<green>Friendly duel", "<gray>No stake is collected.");
         boolean economyAvailable = rewardService.isEconomyAvailable();
+        boolean hasStakeOptions = false;
         if (economyAvailable) {
+            double configuredMax = getConfig().getDouble("duel.max-wager", 1_000_000);
+            double max = Double.isFinite(configuredMax) ? Math.min(Double.MAX_VALUE / 2, Math.max(0, configuredMax)) : 1_000_000;
             for (int i = 0; i < 3; i++) {
+                int amount = 10 * (i + 1);
+                if (amount > max) continue;
                 int slot = 13 + i * 2;
-                int stake = 10 * (i + 1);
-                if (stake > maxWager) continue;
-                String amount = Integer.toString(stake);
-                holder.targets.put(slot, amount);
-                put(inventory, slot, Material.GOLD_INGOT, "<gold>Cược " + amount, "<gray>Mỗi người cược " + amount + ".", "<gray>Người thắng nhận cả hai phần.");
-                hasWagerOption = true;
+                holder.targets.put(slot, "vault " + amount);
+                put(inventory, slot, Material.GOLD_INGOT, "<gold>Stake " + amount + " Vault", "<gray>Each player stakes " + amount + ".");
+                hasStakeOptions = true;
+            }
+        } else {
+            Material fallback = Material.matchMaterial(getConfig().getString("duel.fallback-item", "DIAMOND"));
+            int max = Math.max(0, Math.min(Integer.MAX_VALUE / 2, getConfig().getInt("duel.max-item-stake", 64)));
+            if (fallback != null && fallback.isItem() && !fallback.isAir() && max > 0) {
+                for (int i = 0; i < 3; i++) {
+                    int amount = Math.min(max, 3 * (i + 1));
+                    int slot = 13 + i * 2;
+                    holder.targets.put(slot, fallback.name() + " " + amount);
+                    put(inventory, slot, fallback, "<gold>Stake " + amount + " " + fallback.name(), "<gray>Each player stakes " + amount + " items.");
+                    hasStakeOptions = true;
+                }
             }
         }
-        if (!economyAvailable) {
-            put(inventory, 15, Material.BARRIER, "<red>Chưa có economy", "<gray>Cài Vault và plugin economy để bật cược.");
-        } else if (!hasWagerOption) {
-            put(inventory, 15, Material.BARRIER, "<red>Cược đã tắt", "<gray>Tăng duel.max-wager để bật cược.");
-        }
+        if (!hasStakeOptions) put(inventory, 15, Material.BARRIER, "<red>No stakes configured", "<gray>Check duel limits and fallback-item.");
         challenger.openInventory(inventory);
     }
 
@@ -1171,7 +1264,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> { boolean removed = false; synchronized (this) { try { ensureWriterConnection(); try (PreparedStatement ps = connection.prepareStatement("DELETE FROM words WHERE phrase=?")) { ps.setString(1, phrase); removed = ps.executeUpdate() > 0; } } catch (SQLException ex) { getLogger().warning(ex.getMessage()); } } if (removed) { dictionary.remove(phrase); refreshWordIndex(); } boolean result = removed; Bukkit.getScheduler().runTask(this, () -> sender.sendMessage(message(result ? "<green>Đã xóa: " + escape(phrase) : "<red>Không tìm thấy từ."))); });
     }
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (args.length == 1) return List.of("start", "stop", "reset", "vote", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "join", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload", "skip").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 1) return List.of("start", "stop", "reset", "vote", "menu", "top", "wins", "rewards", "reward", "difficulty", "duel", "accept", "join", "leave", "deny", "add", "remove", "report", "reports", "approve", "reject", "import", "reload", "skip").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 2 && args[0].equalsIgnoreCase("duel")) return Bukkit.getOnlinePlayers().stream().map(Player::getName).filter(n -> n.toLowerCase(Locale.ROOT).startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 3 && args[0].equalsIgnoreCase("duel")) return List.of("30", "60", "off").stream().filter(s -> s.startsWith(args[2].toLowerCase(Locale.ROOT))).toList();
+        if (args.length == 4 && args[0].equalsIgnoreCase("duel")) return List.of("auto", "vault", "DIAMOND", "EMERALD").stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(args[3].toLowerCase(Locale.ROOT))).toList();
         if (args.length == 2 && args[0].equalsIgnoreCase("vote")) return List.of("yes", "no").stream().filter(s -> s.startsWith(args[1].toLowerCase(Locale.ROOT))).toList();
         return List.of();
     }
@@ -1251,6 +1347,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private void stopPublicGame(String requesterName) {
         cancelGameVote("<yellow>Đề xuất đã bị hủy vì admin dừng ván.");
         cancelNextMatch();
+        cancelPublicIdleTimeout();
         game.stop();
         publicParticipants.clear();
         Bukkit.broadcast(message("<yellow>Trò Nối Từ đã dừng bởi " + escape(requesterName) + "."));
@@ -1282,13 +1379,14 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         private String lastWord = "", previousWord = ""; private int moves; private boolean active;
         private UUID lastPlayer; private long lastMoveAt;
         private final Map<String,Integer> used = new HashMap<>(); private int hardRun;
-        synchronized void start(String phrase) { used.clear(); lastWord = phrase; previousWord = ""; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; lastPlayer = null; lastMoveAt = System.currentTimeMillis(); active = true; if (displayService != null) displayService.start(phrase, moves); }
-        synchronized void reset() { used.clear(); lastWord = ""; moves = 0; active = false; }
-        synchronized void stop() { active = false; if (displayService != null) displayService.stop(); }
+        synchronized void start(String phrase) { used.clear(); lastWord = phrase; previousWord = ""; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; lastPlayer = null; lastMoveAt = System.currentTimeMillis(); active = true; if (displayService != null) displayService.start(phrase, moves); armPublicIdleTimeout(); }
+        synchronized void reset() { used.clear(); lastWord = ""; moves = 0; active = false; lastPlayer = null; cancelPublicIdleTimeout(); }
+        synchronized void stop() { active = false; lastPlayer = null; cancelPublicIdleTimeout(); if (displayService != null) displayService.stop(); }
         synchronized boolean isActive() { return active; }
         synchronized int getMoves() { return moves; }
         synchronized String getLastWord() { return lastWord; }
         synchronized UUID getLastPlayer() { return lastPlayer; }
+        synchronized void clearLastPlayer(UUID player) { if (Objects.equals(lastPlayer, player)) lastPlayer = null; }
         synchronized boolean maySubmit(UUID player, long now, long minimumDelay, boolean antiSolo) { return active && (!antiSolo || lastPlayer == null || !lastPlayer.equals(player)) && now - lastMoveAt >= Math.max(0, minimumDelay); }
         synchronized void recordPlayer(UUID player, long now) { lastPlayer = player; lastMoveAt = now; }
         synchronized String requiredSyllable() { String[] parts = lastWord.split(" "); return parts[parts.length - 1]; }
@@ -1304,6 +1402,6 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             used.merge(phrase,1,Integer::sum); previousWord = lastWord; lastWord = phrase; moves++; return true;
         }
     }
-    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);GameVote vote=gameVote;if(vote!=null&&vote.requester().equals(id))cancelGameVote("<yellow>Đề xuất " + voteActionName(vote.action()) + " bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
+    @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);game.clearLastPlayer(id);GameVote vote=gameVote;if(vote!=null&&vote.requester().equals(id))cancelGameVote("<yellow>Đề xuất " + voteActionName(vote.action()) + " bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}
     @EventHandler public void onJoin(PlayerJoinEvent event) { if (displayService != null) displayService.showTo(event.getPlayer()); }
 }
