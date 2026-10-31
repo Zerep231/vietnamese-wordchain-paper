@@ -25,7 +25,7 @@ Plugin mini-game nối từ tiếng Việt cho Paper. Hỗ trợ ván công khai
 ## Cài đặt nhanh
 
 1. Cài Java 25 và Paper 26.1+.
-2. Tải `word-chain-1.5.0.jar` từ [GitHub Releases](https://github.com/Zerep231/vietnamese-wordchain-paper/releases).
+2. Tải `word-chain-1.6.0.jar` từ [GitHub Releases](https://github.com/Zerep231/vietnamese-wordchain-paper/releases).
 3. Chép JAR vào `plugins/`, rồi khởi động máy chủ.
 4. Chỉnh `plugins/WordChain/config.yml`; dùng `/noitu reload` để nạp lại cấu hình.
 
@@ -39,7 +39,7 @@ Cần JDK 25 và Maven 3.9 trở lên.
 mvn clean verify
 ```
 
-JAR được tạo tại `target/word-chain-1.5.0.jar`. GitHub Actions chạy cùng lệnh build khi có tag `v*` và đính kèm JAR phù hợp với tag vào GitHub Release.
+JAR được tạo tại `target/word-chain-1.6.0.jar`. GitHub Actions chạy cùng lệnh build khi có tag `v*` và đính kèm JAR phù hợp với tag vào GitHub Release.
 
 ## Lệnh
 
