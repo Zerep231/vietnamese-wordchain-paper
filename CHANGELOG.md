@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+- Added configurable Vault or mineral-item wagers to duels, with escrow, winner payouts, refunds, and duel-menu choices that adapt to installed economy support.
+- Added `/noitu leave` and a configurable idle timeout for public games; the last player to connect wins, while untouched games are cancelled.
+- Updated duel syntax and documentation for duration, stake type, and stake amount.
+
+
 ## 1.5.0
 - Public game chat interception is limited to opted-in participants; spectators can use normal chat freely.
 - Added optional consensual Vault wagers to duels, quick stake choices in the duel menu, payout/refund handling, a configurable wager cap, and decimal precision validation.
