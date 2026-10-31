@@ -16,7 +16,7 @@ Plugin mini-game nối từ tiếng Việt cho Paper. Hỗ trợ ván công khai
 - Chuẩn hóa tiếng Việt Unicode NFC, bỏ khác biệt hoa thường và lập chỉ mục từ theo âm tiết để tra cứu nhanh.
 - Chat nối từ chỉ được xử lý cho người đã tham gia ván công khai; người xem vẫn chat bình thường.
 - Chặn lặp từ theo giới hạn cấu hình, chống solo, kiểm tra thời gian phản ứng và loại chu kỳ đảo ngược tức thời như `kia đó → đó kia → kia đó`.
-- Duel riêng có thời gian lượt, giới hạn trận, chọn đấu vui hoặc cược qua Vault.
+- Duel riêng có thời gian lượt, giới hạn trận, chọn đấu vui hoặc cược vật phẩm/Vault.
 - Cược chỉ được trừ khi người nhận chấp thuận; người thắng nhận pot. Trận hòa hoặc dừng bình thường sẽ hoàn cược.
 - BossBar, ActionBar, GUI, reward theo chuỗi thắng, báo từ thiếu và công cụ quản trị.
 - Top 10 PlaceholderAPI và API bất đồng bộ để plugin menu, scoreboard, hologram dùng dữ liệu.
@@ -49,11 +49,11 @@ Alias lệnh: `/wordchain`, `/wc`, `/noitu`.
 | --- | --- | --- |
 | `/noitu` hoặc `/noitu menu` | Mở menu trò chơi | `wordchain.menu` |
 | `/noitu start [cụm từ]` | Mở ván công khai; người chơi tham gia bằng accept | `wordchain.play` |
-| `/noitu accept` · `/noitu join` | Nhận lời mời duel hoặc tham gia ván công khai | `wordchain.duel.respond` · `wordchain.play` |
+| `/noitu accept` · `/noitu join` · `/noitu leave` | Nhận duel, tham gia hoặc rời ván công khai | `wordchain.duel.respond` · `wordchain.play` · người chơi |
 | `/noitu stop` | Người chơi đề xuất vote dừng; admin dừng ngay | `wordchain.play` · `wordchain.admin` |
 | `/noitu reset` | Đề xuất mở ván công khai mới qua vote | `wordchain.play` |
 | `/noitu vote <yes\|no>` | Bỏ phiếu cho đề xuất đang mở | `wordchain.vote` |
-| `/noitu duel <player> [seconds\|off] [wager]` | Mời duel; cược bỏ qua hoặc đặt 0 để đấu vui | `wordchain.duel` |
+| `/noitu duel <player> <seconds\|off> <auto\|vault\|MATERIAL> <amount>` | Mời duel; `auto` chọn Vault hoặc vật phẩm mặc định; amount `0` để đấu vui | `wordchain.duel` |
 | `/noitu deny` | Từ chối lời mời duel | `wordchain.duel.respond` |
 | `/noitu top` · `/noitu wins <player>` | Xem top 10 hoặc thống kê người chơi | `wordchain.top` · `wordchain.stats` |
 | `/noitu report <tiếng1 tiếng2>` | Báo cụm từ thiếu | `wordchain.report` |
@@ -69,13 +69,14 @@ Quyền cơ bản được gom trong `wordchain.player` và mặc định mở c
 Duel mặc định là đấu vui, không cược. Khi đã cài Vault và economy provider, có thể mời cược với cú pháp:
 
 ```text
-/noitu duel Steve 30 50
-/noitu duel Steve off 50
+/noitu duel Steve 30 vault 50
+/noitu duel Steve 30 DIAMOND 3
+/noitu duel Steve off auto 0
 ```
 
-Mức cược là số tiền **mỗi người** đóng, tối đa hai chữ số thập phân. Lời mời ghi rõ mức cược; cả hai bên phải đủ tiền và người được mời phải chấp nhận. Người thắng nhận tổng tiền cược của hai bên. Trận kết thúc không có người thắng sẽ hoàn cược. Khi chọn duel trong GUI, người chơi có thể chọn đấu vui hoặc một trong các mức cược nhanh.
+Cú pháp đặt thời gian trước, sau đó chọn loại cược và số lượng. `vault` yêu cầu Vault cùng economy provider; loại vật phẩm dùng material Bukkit như `DIAMOND` hoặc `EMERALD` và cược số nguyên. `auto` chọn Vault khi khả dụng, nếu không dùng `duel.fallback-item`. Giá trị `0` tạo trận đấu vui. Hai bên phải đủ tài sản khi chấp nhận; vật cược được giữ trong lúc đấu, người thắng nhận pot, hòa hoặc hủy sẽ hoàn cược. GUI hỗ trợ cược Vault khi có economy và cược vật phẩm dự phòng khi không có Vault.
 
-Giới hạn mỗi bên bằng `duel.max-wager` trong config. Đặt giá trị `0` để tắt cược nhưng vẫn giữ duel miễn phí.
+Giới hạn tiền Vault đặt tại `duel.max-wager`; giới hạn vật phẩm tại `duel.max-item-stake`. Phần thưởng trận công khai có thể tùy chỉnh qua `rewards.items`, `rewards.economy` và `rewards.commands`. Ván công khai tự đóng sau `game.idle-timeout-minutes` phút không có lượt nối: người nối cuối thắng; nếu chưa ai nối, ván bị hủy.
 
 ## Cấu hình
 
@@ -87,7 +88,7 @@ File mặc định: `src/main/resources/config.yml`. File runtime: `plugins/Word
 | `dictionary` | URL nguồn, timeout tải, nạp lại khi khởi động |
 | `anti-abuse` | Chống solo, độ trễ phản ứng, giới hạn lặp và chuỗi cụm khó |
 | `display` · `menu` | Thời gian lượt, MiniMessage cho BossBar/ActionBar và tiêu đề GUI |
-| `duel` | Số lượt thắng, thời gian lời mời/lượt/trận, trần cược `max-wager` |
+| `duel` | Số lượt thắng, thời gian lời mời/lượt/trận, chọn loại cược và giới hạn vật cược |
 | `rewards` · `streak-rewards` | Vật phẩm, tiền Vault, lệnh console và hệ số streak |
 | `difficulty` · `reports` | Mức khó cụm từ và cooldown báo từ |
 
