@@ -9,7 +9,7 @@ libraries:
 commands:
   wordchain:
     description: Word-chain game controls and menu
-    usage: /wordchain <start|stop|reset|accept|join|vote|menu|top|wins|rewards|reward|difficulty|duel|deny|add|remove|report|reports|approve|reject|import|reload|skip>
+    usage: /wordchain <start|stop|reset|accept|join|leave|vote|menu|top|wins|rewards|reward|difficulty|duel|deny|add|remove|report|reports|approve|reject|import|reload|skip>
     aliases: [wc, noitu]
 permissions:
   wordchain.player:
