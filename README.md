@@ -1,6 +1,8 @@
 # WordChain
 
-Plugin mini-game nối từ tiếng Việt cho Paper. Hỗ trợ ván công khai, đấu tay đôi có hoặc không cược, menu trong game, bảng xếp hạng và tích hợp cho plugin bên ngoài.
+Plugin nối từ tiếng Việt dành cho Paper, hỗ trợ ván công khai, duel riêng, cược vật phẩm hoặc Vault, bảng xếp hạng và tích hợp với plugin giao diện bên ngoài.
+
+> **Phiên bản 1.6.0** · Yêu cầu Java 25 và Paper 26.1 trở lên.
 
 ![Java 25](https://img.shields.io/badge/Java-25-orange) ![Paper](https://img.shields.io/badge/Paper-26.1%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -25,7 +27,7 @@ Plugin mini-game nối từ tiếng Việt cho Paper. Hỗ trợ ván công khai
 ## Cài đặt nhanh
 
 1. Cài Java 25 và Paper 26.1+.
-2. Tải `word-chain-1.6.0.jar` từ [GitHub Releases](https://github.com/Zerep231/vietnamese-wordchain-paper/releases).
+2. Tải [word-chain-1.6.0.jar](https://github.com/Zerep231/vietnamese-wordchain-paper/releases/download/v1.6.0/word-chain-1.6.0.jar) từ GitHub Releases.
 3. Chép JAR vào `plugins/`, rồi khởi động máy chủ.
 4. Chỉnh `plugins/WordChain/config.yml`; dùng `/noitu reload` để nạp lại cấu hình.
 
@@ -64,9 +66,9 @@ Alias lệnh: `/wordchain`, `/wc`, `/noitu`.
 
 Quyền cơ bản được gom trong `wordchain.player` và mặc định mở cho người chơi. Quyền quản trị mặc định dành cho operator. Đặt `game.members-can-control: false` để chỉ admin điều khiển start/reset và đề xuất dừng.
 
-## Duel có cược
+## Duel và cược
 
-Duel mặc định là đấu vui, không cược. Khi đã cài Vault và economy provider, có thể mời cược với cú pháp:
+Dùng `auto` để chọn Vault khi Vault cùng economy provider khả dụng; nếu không, plugin dùng vật phẩm trong `duel.fallback-item`. Chọn amount `0` để đấu vui. Cú pháp:
 
 ```text
 /noitu duel Steve 30 vault 50
@@ -74,7 +76,7 @@ Duel mặc định là đấu vui, không cược. Khi đã cài Vault và econo
 /noitu duel Steve off auto 0
 ```
 
-Cú pháp đặt thời gian trước, sau đó chọn loại cược và số lượng. `vault` yêu cầu Vault cùng economy provider; loại vật phẩm dùng material Bukkit như `DIAMOND` hoặc `EMERALD` và cược số nguyên. `auto` chọn Vault khi khả dụng, nếu không dùng `duel.fallback-item`. Giá trị `0` tạo trận đấu vui. Hai bên phải đủ tài sản khi chấp nhận; vật cược được giữ trong lúc đấu, người thắng nhận pot, hòa hoặc hủy sẽ hoàn cược. GUI hỗ trợ cược Vault khi có economy và cược vật phẩm dự phòng khi không có Vault.
+Tham số thời gian đứng trước loại cược và số lượng. Cả hai người chơi phải đủ tài sản khi đối thủ chấp nhận lời mời. `vault` yêu cầu Vault cùng economy provider; loại vật phẩm dùng material Bukkit như `DIAMOND` hoặc `EMERALD` và cược số nguyên. `auto` chọn Vault khi khả dụng, nếu không dùng `duel.fallback-item`. Giá trị `0` tạo trận đấu vui. Hai bên phải đủ tài sản khi chấp nhận; vật cược được giữ trong lúc đấu, người thắng nhận pot, hòa hoặc hủy sẽ hoàn cược. GUI hỗ trợ cược Vault khi có economy và cược vật phẩm dự phòng khi không có Vault.
 
 Giới hạn tiền Vault đặt tại `duel.max-wager`; giới hạn vật phẩm tại `duel.max-item-stake`. Phần thưởng trận công khai có thể tùy chỉnh qua `rewards.items`, `rewards.economy` và `rewards.commands`. Ván công khai tự đóng sau `game.idle-timeout-minutes` phút không có lượt nối: người nối cuối thắng; nếu chưa ai nối, ván bị hủy.
 
