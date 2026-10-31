@@ -1,5 +1,5 @@
 name: WordChain
-version: 1.4.0
+version: 1.5.0
 main: com.example.wordchain.WordChainPlugin
 api-version: '26.1'
 description: Vietnamese word-chain game with public chat rounds, private duels, rewards, and leaderboard.
@@ -42,7 +42,7 @@ permissions:
     description: Report missing Vietnamese phrases
     default: true
   wordchain.vote:
-    description: Vote on public game reset proposals
+    description: Vote on public game stop or reset proposals
     default: true
   wordchain.admin:
     description: Manage words, reports, dictionary imports, and configuration

@@ -56,3 +56,5 @@ duel:
   default-connect-seconds: 30
   invite-expiry-seconds: 60
   max-match-seconds: 3600
+  # Maximum optional stake per player. Requires Vault plus an economy provider; 0 disables betting.
+  max-wager: 1000000

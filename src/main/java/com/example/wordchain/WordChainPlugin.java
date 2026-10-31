@@ -54,6 +54,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     private volatile long writtenConfigRevision;
     private final Set<String> dictionary = ConcurrentHashMap.newKeySet();
     private final Set<UUID> publicParticipants = ConcurrentHashMap.newKeySet();
+    private volatile List<WordChainApi.LeaderboardEntry> leaderboardCache = List.of();
     private volatile List<String> dictionaryIndex = List.of();
     private volatile Map<String,List<String>> dictionaryByFirstSyllable = Map.of();
     private volatile boolean dictionaryReady;
@@ -95,6 +96,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             @Override public String getCurrentKeyword() { return game.isActive() ? game.getLastWord() : ""; }
             @Override public boolean isKnownPhrase(String phrase) { return dictionary.contains(normalizePhrase(phrase)); }
             @Override public java.util.concurrent.CompletionStage<Integer> getWins(UUID id) { return lookupWins(id); }
+            @Override public java.util.concurrent.CompletionStage<List<WordChainApi.LeaderboardEntry>> getLeaderboard(int limit) { return lookupLeaderboard(limit); }
+            @Override public void openMenu(Player player) { openPlayerMenu(player); }
         };
         getServer().getServicesManager().register(WordChainApi.class, api, this, ServicePriority.Normal);
         Objects.requireNonNull(getCommand("wordchain")).setExecutor(this);
@@ -103,6 +106,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new WordChainExpansion(this).register();
         }
+        refreshLeaderboardCache();
+        Bukkit.getScheduler().runTaskTimer(this, this::refreshLeaderboardCache, 1200L, 1200L);
         boolean refresh = getConfig().getBoolean("dictionary.refresh-on-start", true);
         if (refresh) scheduleImport(null, false);
         else Bukkit.getScheduler().runTaskAsynchronously(this, this::loadDictionaryCache);
@@ -121,10 +126,14 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         }
         if (!getConfig().contains("game.recent-start-limit")) { getConfig().set("game.recent-start-limit", 20); changed = true; }
         if (!getConfig().contains("game.reset-vote-seconds")) { getConfig().set("game.reset-vote-seconds", 30); changed = true; }
+        if (!getConfig().contains("duel.max-wager")) { getConfig().set("duel.max-wager", 1_000_000); changed = true; }
         if (changed) saveConfig();
     }
 
     @Override public void onDisable() {
+        for (DuelMatch match : new HashSet<>(duels.values())) {
+            finishDuel(match, null, "Máy chủ đang tắt; duel đã dừng.");
+        }
         if (displayService != null) displayService.stop();
         if (api != null) getServer().getServicesManager().unregister(WordChainApi.class, api);
         cancelNextMatch();
@@ -150,8 +159,8 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             else Bukkit.getScheduler().runTask(this, () -> notifyDuelError(id, "<red>Trong duel, hãy gửi đúng một cụm gồm hai tiếng."));
             return;
         }
-        // Ignore ordinary conversation and long messages before scheduling any main-thread work.
-        if (!game.isActive()) return;
+        // Public game words are private to opted-in participants. Spectators retain normal chat.
+        if (!GameplayRules.shouldProcessPublicChat(game.isActive(), publicParticipants.contains(id))) return;
         String phrase = normalizeCandidate(input);
         if (phrase == null) return;
         event.setCancelled(true); // Accepted moves are announced once by processMove; invalid moves get private feedback.
@@ -319,12 +328,17 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         return usedWords.getOrDefault(phrase, 0) < limit;
     }
     private boolean hasContinuation(String phrase, Map<String,Integer> uses, int hardRun) {
+        return hasContinuation(phrase, uses, hardRun, null);
+    }
+    private boolean hasContinuation(String phrase, Map<String,Integer> uses, int hardRun, String previousPhrase) {
         int split = phrase.indexOf(' '); if (split < 0) return false;
         List<String> candidates = dictionaryByFirstSyllable.get(phrase.substring(split + 1)); if (candidates == null) return false;
         int limit = Math.max(1, Math.min(5, getConfig().getInt("anti-abuse.word-use-limit", 3)));
         int threshold = getConfig().getInt("difficulty.hard-threshold", 4);
         int maxHard = Math.max(1, getConfig().getInt("anti-abuse.max-hard-words-in-row", 2));
         for (String candidate : candidates) {
+            // Prevent the immediate A -> B -> A reversal that makes common two-word loops tedious.
+            if (!GameplayRules.allowsNextPhrase(candidate, previousPhrase)) continue;
             if (uses.getOrDefault(candidate, 0) >= limit) continue;
             if (getConfig().getInt("difficulty.words." + candidate, 1) >= threshold && hardRun >= maxHard) continue;
             return true;
@@ -657,7 +671,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
                 connection.commit();
             } catch (SQLException e) { try { connection.rollback(); } catch (SQLException ignored) {} getLogger().warning("Could not save win: " + e.getMessage()); }
             finally { try { connection.setAutoCommit(true); } catch (SQLException ignored) {} }
-        } int currentStreak = streak; Bukkit.getScheduler().runTask(this, () -> {
+        } refreshLeaderboardCache(); int currentStreak = streak; Bukkit.getScheduler().runTask(this, () -> {
             payReward(id, currentStreak);
             Component streakMessage = message("<gold>Chuỗi thắng của <yellow>" + escape(name) + "</yellow>: <bold>" + currentStreak + "</bold>! Phần thưởng được nhân theo chuỗi.");
             if (duel) {
@@ -687,45 +701,186 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
     private void notifyInvalidMove(UUID id,String raw){long now=System.currentTimeMillis(),last=wrongMoveNotice.getOrDefault(id,0L);if(now-last<1500)return;wrongMoveNotice.put(id,now);Player p=Bukkit.getPlayer(id);if(p==null)return;String phrase=normalizePhrase(raw),required=game.requiredSyllable();String feedback=!phrase.startsWith(required+" ")?"<red>Cụm từ phải bắt đầu bằng <yellow>"+escape(required)+"</yellow>.":!dictionary.contains(phrase)?"<red>Từ chưa có trong từ điển. Dùng /wordchain report "+escape(phrase)+" để báo từ.":"<red>Cụm từ đã dùng quá giới hạn hoặc không hợp lệ.";p.sendMessage(message(feedback));}
 
-    private void createDuelInvite(CommandSender sender,String[] args){
-        if(!(sender instanceof Player challenger)){sender.sendMessage("Only players can challenge a duel.");return;}if(args.length<2||args.length>3){sender.sendMessage(message("<yellow>/wordchain duel <player> [seconds|off]"));return;}
-        Player target=Bukkit.getPlayerExact(args[1]);if(target==null||target.equals(challenger)||duels.containsKey(target.getUniqueId())||duels.containsKey(challenger.getUniqueId())){sender.sendMessage(message("<red>Người chơi không hợp lệ hoặc đang đấu."));return;}
-        int seconds=getConfig().getInt("duel.default-connect-seconds",30);if(args.length==3){if(args[2].equalsIgnoreCase("off"))seconds=0;else try{seconds=Integer.parseInt(args[2]);}catch(NumberFormatException e){sender.sendMessage(message("<red>Thời gian phải là số giây hoặc off."));return;}}
-        if(seconds!=0&&(seconds<5||seconds>300)){sender.sendMessage(message("<red>Thời gian kết nối hợp lệ: off hoặc 5-300 giây."));return;}
-        DuelInvite invite=new DuelInvite(challenger.getUniqueId(),challenger.getName(),target.getUniqueId(),seconds);duelInvites.put(target.getUniqueId(),invite);
-        target.sendMessage(message("<gold>"+escape(challenger.getName())+" thách đấu Nối Từ. Dùng <yellow>/wordchain accept</yellow> hoặc <yellow>/wordchain deny</yellow>. Thời gian nối: "+(seconds==0?"không giới hạn":seconds+" giây")+"."));challenger.sendMessage(message("<green>Đã gửi lời mời đấu tới "+escape(target.getName())+"."));
-        Bukkit.getScheduler().runTaskLater(this,()->duelInvites.remove(target.getUniqueId(),invite),Math.max(20,getConfig().getLong("duel.invite-expiry-seconds",60))*20L);
+    private void createDuelInvite(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player challenger)) { sender.sendMessage("Only players can challenge a duel."); return; }
+        if (args.length < 2 || args.length > 4) {
+            sender.sendMessage(message("<yellow>/wordchain duel <player> [seconds|off] [wager|0]"));
+            return;
+        }
+        Player target = Bukkit.getPlayerExact(args[1]);
+        if (target == null || target.equals(challenger) || duels.containsKey(target.getUniqueId()) || duels.containsKey(challenger.getUniqueId())) {
+            sender.sendMessage(message("<red>Người chơi không hợp lệ hoặc đang đấu."));
+            return;
+        }
+
+        int seconds = getConfig().getInt("duel.default-connect-seconds", 30);
+        if (args.length >= 3) {
+            if (args[2].equalsIgnoreCase("off")) seconds = 0;
+            else try { seconds = Integer.parseInt(args[2]); }
+            catch (NumberFormatException e) { sender.sendMessage(message("<red>Thời gian phải là số giây hoặc off.")); return; }
+        }
+        if (seconds != 0 && (seconds < 5 || seconds > 300)) {
+            sender.sendMessage(message("<red>Thời gian kết nối hợp lệ: off hoặc 5-300 giây."));
+            return;
+        }
+
+        double wager = 0;
+        if (args.length == 4) {
+            try { wager = Double.parseDouble(args[3]); }
+            catch (NumberFormatException e) { sender.sendMessage(message("<red>Mức cược phải là số hợp lệ hoặc 0.")); return; }
+        }
+        double configuredMax = getConfig().getDouble("duel.max-wager", 1_000_000);
+        double maxWager = Double.isFinite(configuredMax)
+                ? Math.min(Double.MAX_VALUE / 2, Math.max(0, configuredMax)) : 1_000_000;
+        if (!GameplayRules.isValidWager(wager, maxWager)) {
+            sender.sendMessage(message("<red>Mức cược hợp lệ: 0 đến " + formatMoney(maxWager) + "."));
+            return;
+        }
+        if (wager > 0 && !rewardService.isEconomyAvailable()) {
+            sender.sendMessage(message("<red>Cần cài Vault cùng plugin economy để mở duel có cược."));
+            return;
+        }
+        if (wager > 0 && !rewardService.hasFunds(challenger.getUniqueId(), wager)) {
+            sender.sendMessage(message("<red>Bạn không đủ tiền để chọn mức cược này."));
+            return;
+        }
+
+        DuelInvite invite = new DuelInvite(challenger.getUniqueId(), challenger.getName(), target.getUniqueId(), seconds, wager);
+        duelInvites.put(target.getUniqueId(), invite);
+        String wagerText = wager == 0 ? "đấu vui, không cược" : "mỗi bên cược " + formatMoney(wager);
+        String turnText = seconds == 0 ? "không giới hạn" : seconds + " giây";
+        target.sendMessage(message("<gold>" + escape(challenger.getName()) + " mời bạn đấu Nối Từ (" + wagerText
+                + "). Dùng <yellow>/wordchain accept</yellow> để đồng ý mức cược hoặc <yellow>/wordchain deny</yellow> để từ chối. Thời gian nối: " + turnText + "."));
+        challenger.sendMessage(message("<green>Đã gửi lời mời đấu tới " + escape(target.getName()) + " (" + wagerText + ")."));
+        long expiryTicks = Math.max(20, getConfig().getLong("duel.invite-expiry-seconds", 60)) * 20L;
+        Bukkit.getScheduler().runTaskLater(this, () -> duelInvites.remove(target.getUniqueId(), invite), expiryTicks);
     }
-    private void acceptDuel(CommandSender sender,String[] args){if(!(sender instanceof Player receiver)){sender.sendMessage("Only players can accept duels.");return;}DuelInvite invite=duelInvites.remove(receiver.getUniqueId());if(invite==null){joinPublicGame(receiver);return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger==null||!dictionaryReady){sender.sendMessage(message("<red>Người thách đấu đã rời mạng hoặc từ điển chưa sẵn sàng."));return;}if(duels.containsKey(challenger.getUniqueId())||duels.containsKey(receiver.getUniqueId()))return;
-        String start=randomStartingWord();if(start==null){sender.sendMessage(message("<red>Từ điển chưa có từ mở màn khả dụng."));return;}rememberStartingWord(start);DuelMatch match=new DuelMatch(challenger.getUniqueId(),challenger.getName(),receiver.getUniqueId(),receiver.getName(),invite.connectSeconds,start);duels.put(challenger.getUniqueId(),match);duels.put(receiver.getUniqueId(),match);
-        long maxTicks=Math.max(60,Math.min(3600,getConfig().getLong("duel.max-match-seconds",3600)))*20L;match.maxTask=Bukkit.getScheduler().runTaskLater(this,()->finishDuel(match,null,"Trận đấu tự dừng sau một giờ."),maxTicks).getTaskId();armDuelTurn(match);sendDuelMessage(match,"<gold>Đấu bắt đầu! <yellow>"+escape(challenger.getName())+"</yellow> đấu với <yellow>"+escape(receiver.getName())+"</yellow>. Từ khóa: <aqua>"+escape(start)+"</aqua>. Lượt đầu: "+escape(challenger.getName())+".");
+
+    private void acceptDuel(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player receiver)) { sender.sendMessage("Only players can accept duels."); return; }
+        DuelInvite invite = duelInvites.get(receiver.getUniqueId());
+        if (invite == null) { joinPublicGame(receiver); return; }
+        Player challenger = Bukkit.getPlayer(invite.challenger());
+        if (challenger == null || !dictionaryReady) {
+            duelInvites.remove(receiver.getUniqueId(), invite);
+            sender.sendMessage(message("<red>Người thách đấu đã rời mạng hoặc từ điển chưa sẵn sàng."));
+            return;
+        }
+        if (duels.containsKey(challenger.getUniqueId()) || duels.containsKey(receiver.getUniqueId())) return;
+        String start = randomStartingWord();
+        if (start == null) { sender.sendMessage(message("<red>Từ điển chưa có từ mở màn khả dụng.")); return; }
+
+        boolean escrowed = false;
+        if (invite.wager() > 0) {
+            if (!rewardService.isEconomyAvailable()) {
+                duelInvites.remove(receiver.getUniqueId(), invite);
+                sender.sendMessage(message("<red>Economy không còn khả dụng; duel cược đã bị hủy."));
+                return;
+            }
+            if (!rewardService.hasFunds(invite.challenger(), invite.wager())) {
+                cancelDuelInvite(receiver, challenger, invite, "<red>Người thách đấu không đủ tiền; lời mời đã bị hủy.", "<red>Bạn không đủ tiền để giữ mức cược đã chọn.");
+                return;
+            }
+            if (!rewardService.hasFunds(receiver.getUniqueId(), invite.wager())) {
+                cancelDuelInvite(receiver, challenger, invite, "<red>Bạn không đủ tiền để nhận mức cược này.", "<yellow>Đối thủ không đủ tiền cho mức cược; lời mời đã bị hủy.");
+                return;
+            }
+            if (!rewardService.withdrawWager(invite.challenger(), invite.wager())) {
+                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ tiền cược từ người thách đấu.", "<yellow>Không thể giữ tiền cược; duel đã bị hủy.");
+                return;
+            }
+            if (!rewardService.withdrawWager(receiver.getUniqueId(), invite.wager())) {
+                boolean refunded = rewardService.depositWager(invite.challenger(), invite.wager());
+                cancelDuelInvite(receiver, challenger, invite, "<red>Không thể giữ tiền cược từ bạn.", refunded
+                        ? "<yellow>Không thể bắt đầu cược; tiền của bạn đã được hoàn lại."
+                        : "<red>Không thể hoàn tiền tự động. Hãy báo admin kiểm tra economy.");
+                return;
+            }
+            escrowed = true;
+        }
+
+        duelInvites.remove(receiver.getUniqueId(), invite);
+        rememberStartingWord(start);
+        DuelMatch match = new DuelMatch(challenger.getUniqueId(), challenger.getName(), receiver.getUniqueId(),
+                receiver.getName(), invite.connectSeconds(), start, invite.wager(), escrowed);
+        duels.put(challenger.getUniqueId(), match);
+        duels.put(receiver.getUniqueId(), match);
+        long maxTicks = Math.max(60, Math.min(3600, getConfig().getLong("duel.max-match-seconds", 3600))) * 20L;
+        match.maxTask = Bukkit.getScheduler().runTaskLater(this,
+                () -> finishDuel(match, null, "Trận đấu tự dừng sau một giờ."), maxTicks).getTaskId();
+        armDuelTurn(match);
+        String wagerText = invite.wager() == 0 ? "Trận đấu này không cược."
+                : "Mỗi bên đã cược " + formatMoney(invite.wager()) + "; người thắng nhận tổng " + formatMoney(invite.wager() * 2) + ".";
+        sendDuelMessage(match, "<gold>Đấu bắt đầu! <yellow>" + escape(challenger.getName()) + "</yellow> đấu với <yellow>"
+                + escape(receiver.getName()) + "</yellow>. " + escape(wagerText) + " Từ khóa: <aqua>" + escape(start)
+                + "</aqua>. Lượt đầu: " + escape(challenger.getName()) + ".");
+    }
+
+    private void cancelDuelInvite(Player receiver, Player challenger, DuelInvite invite, String receiverMessage, String challengerMessage) {
+        duelInvites.remove(receiver.getUniqueId(), invite);
+        receiver.sendMessage(message(receiverMessage));
+        challenger.sendMessage(message(challengerMessage));
     }
     private void denyDuel(CommandSender sender,String[] args){if(!(sender instanceof Player p)){sender.sendMessage("Only players can deny duels.");return;}DuelInvite invite=duelInvites.remove(p.getUniqueId());if(invite==null){sender.sendMessage(message("<red>Không có lời mời đang chờ."));return;}Player challenger=Bukkit.getPlayer(invite.challenger);if(challenger!=null)challenger.sendMessage(message("<yellow>"+escape(p.getName())+" đã từ chối lời mời."));sender.sendMessage(message("<gray>Đã từ chối lời mời."));}
     private void armDuelTurn(DuelMatch match){if(match.turnSeconds<=0)return;if(match.turnTask!=0)Bukkit.getScheduler().cancelTask(match.turnTask);match.turnTask=Bukkit.getScheduler().runTaskLater(this,()->finishDuel(match,otherPlayer(match,match.turn),"Hết thời gian nối từ."),match.turnSeconds*20L).getTaskId();}
     private UUID otherPlayer(DuelMatch m,UUID id){return m.first.equals(id)?m.second:m.first;}
     private void processDuelMove(DuelMatch m,UUID id,String name,String raw){
         if(!m.active)return;if(!m.turn.equals(id)){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<yellow>Chưa đến lượt bạn nối từ."));return;}
-        if(!hasContinuation(m.last,m.uses,m.hardRun)){resetDuelRound(m);return;}
+        if(!hasContinuation(m.last,m.uses,m.hardRun,m.previous)){resetDuelRound(m);return;}
         String phrase=raw;String required=m.last.split(" ")[1];if(!phrase.startsWith(required+" ")){notifyDuelError(id,"<red>Nối chưa đúng; tiếng đầu phải là <yellow>"+escape(required)+"</yellow>.");return;}if(!dictionary.contains(phrase)){notifyDuelError(id,"<red>Từ chưa có trong từ điển; hãy báo bằng /wordchain report "+escape(phrase)+".");return;}
+        if(!GameplayRules.allowsNextPhrase(phrase,m.previous)){notifyDuelError(id,"<red>Không thể nối ngược ngay về cụm vừa dùng; hãy chọn cụm khác để tránh lặp vòng.");return;}
         int limit=Math.max(1,Math.min(5,getConfig().getInt("anti-abuse.word-use-limit",3)));if(m.uses.getOrDefault(phrase,0)>=limit){Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message("<red>Cụm từ này đã đạt giới hạn sử dụng."));return;}
         int difficulty=getConfig().getInt("difficulty.words."+phrase,1),threshold=getConfig().getInt("difficulty.hard-threshold",4),maxHard=Math.max(1,getConfig().getInt("anti-abuse.max-hard-words-in-row",2));if(difficulty>=threshold&&m.hardRun>=maxHard){notifyDuelError(id,"<red>Đã đạt giới hạn cụm khó liên tiếp. Hãy chọn một cụm dễ hơn.");return;}m.hardRun=difficulty>=threshold?m.hardRun+1:0;
-        m.uses.merge(phrase,1,Integer::sum);m.last=phrase;m.moves++;m.turn=otherPlayer(m,id);armDuelTurn(m);sendDuelMessage(m,"<aqua>[ĐẤU]</aqua> <yellow>"+escape(name)+"</yellow>: <white>"+escape(phrase)+"</white>. Từ cần nối: <gold>"+escape(phrase.split(" ")[1])+"</gold>.");
+        m.uses.merge(phrase,1,Integer::sum);m.previous=m.last;m.last=phrase;m.moves++;m.turn=otherPlayer(m,id);armDuelTurn(m);sendDuelMessage(m,"<aqua>[ĐẤU]</aqua> <yellow>"+escape(name)+"</yellow>: <white>"+escape(phrase)+"</white>. Từ cần nối: <gold>"+escape(phrase.split(" ")[1])+"</gold>.");
         Bukkit.getPluginManager().callEvent(new WordChainMoveEvent(id,name,phrase));
         if(m.moves>=getConfig().getInt("duel.target-moves",10))finishDuel(m,id,"Đấu kết thúc!");
-        else if(!hasContinuation(m.last,m.uses,m.hardRun))resetDuelRound(m);
+        else if(!hasContinuation(m.last,m.uses,m.hardRun,m.previous))resetDuelRound(m);
     }
     private void resetDuelRound(DuelMatch match) {
         String next = randomStartingWord();
         if (next == null) { finishDuel(match, null, "Không còn từ mở màn có nước nối."); return; }
-        rememberStartingWord(next); match.last=next; match.turn=match.first; match.uses.clear(); match.uses.put(next,1); match.hardRun=initialHardRun(next); match.moves=0; armDuelTurn(match);
+        rememberStartingWord(next); match.last=next; match.previous=""; match.turn=match.first; match.uses.clear(); match.uses.put(next,1); match.hardRun=initialHardRun(next); match.moves=0; armDuelTurn(match);
         sendDuelMessage(match,"<yellow>Không còn nước nối hợp lệ; ván duel được đặt lại với từ khóa ngẫu nhiên <gold>"+escape(next)+"</gold>. Lượt đầu: "+escape(match.firstName)+".");
     }
-    private void finishDuel(DuelMatch m,UUID winner,String reason){if(!m.active)return;m.active=false;duels.remove(m.first,m);duels.remove(m.second,m);if(m.turnTask!=0)Bukkit.getScheduler().cancelTask(m.turnTask);if(m.maxTask!=0)Bukkit.getScheduler().cancelTask(m.maxTask);if(winner==null){sendDuelMessage(m,"<yellow>"+reason+" Không có người thắng.");return;}String name=m.first.equals(winner)?m.firstName:m.secondName;sendDuelMessage(m,"<gold>"+reason+" Người thắng: <yellow>"+escape(name)+"</yellow>!");saveWin(winner,name,true,true,otherPlayer(m,winner));}
+    private void finishDuel(DuelMatch match, UUID winner, String reason) {
+        if (!match.active) return;
+        match.active = false;
+        duels.remove(match.first, match);
+        duels.remove(match.second, match);
+        if (match.turnTask != 0) Bukkit.getScheduler().cancelTask(match.turnTask);
+        if (match.maxTask != 0) Bukkit.getScheduler().cancelTask(match.maxTask);
+
+        String payoutMessage = settleDuelWager(match, winner);
+        if (winner == null) {
+            sendDuelMessage(match, "<yellow>" + reason + " Không có người thắng." + payoutMessage);
+            return;
+        }
+        String winnerName = match.first.equals(winner) ? match.firstName : match.secondName;
+        sendDuelMessage(match, "<gold>" + reason + " Người thắng: <yellow>" + escape(winnerName) + "</yellow>!" + payoutMessage);
+        saveWin(winner, winnerName, true, true, otherPlayer(match, winner));
+    }
+
+    private String settleDuelWager(DuelMatch match, UUID winner) {
+        if (!match.wagerEscrowed) return "";
+        match.wagerEscrowed = false;
+        if (winner == null) {
+            boolean firstRefund = rewardService.depositWager(match.first, match.wager);
+            boolean secondRefund = rewardService.depositWager(match.second, match.wager);
+            if (firstRefund && secondRefund) return " Tiền cược đã được hoàn lại.";
+            getLogger().severe("Could not refund full duel escrow " + formatMoney(match.wager) + " for " + match.first + " and " + match.second);
+            return " <red>Không hoàn đủ tiền cược; hãy báo admin kiểm tra economy.</red>";
+        }
+        double pot = match.wager * 2;
+        if (rewardService.depositWager(winner, pot)) return " Người thắng nhận " + formatMoney(pot) + ".";
+        getLogger().severe("Could not pay duel escrow " + formatMoney(pot) + " to " + winner);
+        return " <red>Không trả được tiền cược; hãy báo admin kiểm tra economy.</red>";
+    }
     private void sendDuelMessage(DuelMatch match,String text){Component component=message(text);Player first=Bukkit.getPlayer(match.first),second=Bukkit.getPlayer(match.second);if(first!=null)first.sendMessage(component);if(second!=null)second.sendMessage(component);}
     private void notifyDuelError(UUID id,String text){long now=System.currentTimeMillis(),last=wrongMoveNotice.getOrDefault(id,0L);if(now-last<1500)return;wrongMoveNotice.put(id,now);Player p=Bukkit.getPlayer(id);if(p!=null)p.sendMessage(message(text));}
 
-    private record DuelInvite(UUID challenger,String challengerName,UUID target,int connectSeconds){}
-    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final Map<String,Integer> uses=new HashMap<>();String last;UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
+    private record DuelInvite(UUID challenger,String challengerName,UUID target,int connectSeconds,double wager){}
+    private final class DuelMatch {final UUID first,second;final String firstName,secondName;final int turnSeconds;final double wager;final Map<String,Integer> uses=new HashMap<>();String last,previous="";UUID turn;int moves,turnTask,maxTask,hardRun;boolean active=true,wagerEscrowed;DuelMatch(UUID a,String an,UUID b,String bn,int seconds,String start,double wager,boolean escrowed){first=a;firstName=an;second=b;secondName=bn;turnSeconds=seconds;this.wager=wager;wagerEscrowed=escrowed;last=start;turn=a;uses.put(start,1);hardRun=initialHardRun(start);}}
+    private static String formatMoney(double amount){return String.format(Locale.ROOT,"%.2f",amount);}
     private void showTop(CommandSender sender) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             List<String> rows = new ArrayList<>();
@@ -752,6 +907,55 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         return result;
     }
 
+    private java.util.concurrent.CompletionStage<List<WordChainApi.LeaderboardEntry>> lookupLeaderboard(int requestedLimit) {
+        int limit = Math.max(1, Math.min(100, requestedLimit));
+        java.util.concurrent.CompletableFuture<List<WordChainApi.LeaderboardEntry>> result = new java.util.concurrent.CompletableFuture<>();
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try (Connection reader = openReadConnection(); PreparedStatement statement = reader.prepareStatement(
+                    "SELECT player_name,wins,current_streak,best_streak FROM wins ORDER BY wins DESC, player_name COLLATE NOCASE ASC LIMIT ?")) {
+                statement.setInt(1, limit);
+                List<WordChainApi.LeaderboardEntry> entries = new ArrayList<>();
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) entries.add(new WordChainApi.LeaderboardEntry(rows.getString(1), rows.getInt(2), rows.getInt(3), rows.getInt(4)));
+                }
+                result.complete(List.copyOf(entries));
+            } catch (SQLException e) { result.completeExceptionally(e); }
+        });
+        return result;
+    }
+
+    private void refreshLeaderboardCache() {
+        lookupLeaderboard(10).thenAccept(entries -> leaderboardCache = entries)
+                .exceptionally(error -> { getLogger().warning("Could not refresh leaderboard cache: " + error.getMessage()); return null; });
+    }
+
+    String placeholderLeaderboard(int rank, String column) {
+        List<WordChainApi.LeaderboardEntry> snapshot = leaderboardCache;
+        if (rank < 1 || rank > snapshot.size()) return column.equals("name") ? "" : "0";
+        WordChainApi.LeaderboardEntry entry = snapshot.get(rank - 1);
+        return switch (column) {
+            case "name" -> entry.playerName();
+            case "wins" -> Integer.toString(entry.wins());
+            case "streak" -> Integer.toString(entry.currentStreak());
+            case "best_streak" -> Integer.toString(entry.bestStreak());
+            default -> "";
+        };
+    }
+
+    boolean placeholderParticipating(UUID playerId) { return playerId != null && publicParticipants.contains(playerId); }
+    boolean placeholderInDuel(UUID playerId) { return playerId != null && duels.containsKey(playerId); }
+    String placeholderDuelWager(UUID playerId) {
+        DuelMatch match = playerId == null ? null : duels.get(playerId);
+        return match == null ? "0" : formatMoney(match.wager);
+    }
+
+    private void openPlayerMenu(Player player) {
+        if (!Bukkit.isPrimaryThread()) { Bukkit.getScheduler().runTask(this, () -> openPlayerMenu(player)); return; }
+        if (!player.isOnline()) return;
+        if (!player.hasPermission("wordchain.menu")) { deny(player); return; }
+        openMenu(player);
+    }
+
     private void showPlayerStats(CommandSender sender, String name) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             String foundName = null; int wins = 0, streak = 0, best = 0;
@@ -774,7 +978,7 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         boolean admin = p.hasPermission("wordchain.admin")||p.hasPermission("wordchain.rewards")||p.hasPermission("wordchain.stats"); MenuHolder holder = new MenuHolder(MenuMode.MAIN);
         Inventory inv = Bukkit.createInventory(holder, admin ? 45 : 27, message(getConfig().getString("menu.title", "<dark_green>Nối Từ</dark_green>"))); holder.inventory = inv;
         put(inv, 10, Material.LIME_WOOL, "<green><bold>Bắt đầu ván</bold>", "<gray>Từ mở màn được chọn ngẫu nhiên, tránh lặp gần đây");
-        put(inv, 12, Material.BARRIER, "<red>Dừng ván", "<gray>Dừng trò chơi hiện tại");
+        put(inv, 12, Material.BARRIER, "<red>Đề xuất dừng ván", "<gray>Người chơi mở vote; admin có thể dừng ngay");
         put(inv, 14, Material.SUNFLOWER, "<yellow>Đề xuất ván mới", "<gray>Người chơi khác bỏ phiếu; cần ít nhất 1/3 đồng ý");
         put(inv, 16, Material.GOLD_INGOT, "<gold>Bảng xếp hạng", "<gray>Xem 10 người thắng nhiều nhất");
         put(inv, 20, Material.LIME_DYE, "<green>Tham gia ván", "<gray>Chấp nhận lời mời hoặc vào ván công khai");
@@ -794,7 +998,16 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
             if (targetId == null) return;
             Player target = Bukkit.getPlayer(UUID.fromString(targetId));
             if (target == null) { p.sendMessage(message("<yellow>Người chơi vừa offline.")); openDuelMenu(p); return; }
-            p.closeInventory(); createDuelInvite(p, new String[]{"duel", target.getName()}); return;
+            openDuelWagerMenu(p, target); return;
+        }
+        if (holder.mode == MenuMode.DUEL_WAGER) {
+            String wager = holder.targets.get(e.getRawSlot());
+            Player target = holder.duelTarget == null ? null : Bukkit.getPlayer(UUID.fromString(holder.duelTarget));
+            if (wager == null) return;
+            if (target == null) { p.sendMessage(message("<yellow>Người chơi vừa offline.")); openDuelMenu(p); return; }
+            p.closeInventory();
+            createDuelInvite(p, new String[]{"duel", target.getName(), Integer.toString(getConfig().getInt("duel.default-connect-seconds", 30)), wager});
+            return;
         }
         switch (e.getRawSlot()) { case 10 -> p.performCommand("wordchain start"); case 12 -> p.performCommand("wordchain stop"); case 14 -> p.performCommand("wordchain reset"); case 16 -> p.performCommand("wordchain top"); case 20 -> p.performCommand("wordchain accept"); case 24 -> openDuelMenu(p); case 29 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain import"); } case 31 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reports"); } case 33 -> { if (p.hasPermission("wordchain.admin")) p.performCommand("wordchain reload"); } case 37 -> { if (hasRewardPermission(p)) openRewardsMenu(p); } case 41 -> { if (hasStatsPermission(p)) openWinsMenu(p); } default -> {} }
     }
@@ -824,10 +1037,42 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         challenger.openInventory(inventory);
     }
 
-    private enum MenuMode { MAIN, REWARDS, WINS, DUEL_TARGET }
+    private void openDuelWagerMenu(Player challenger, Player target) {
+        MenuHolder holder = new MenuHolder(MenuMode.DUEL_WAGER);
+        holder.duelTarget = target.getUniqueId().toString();
+        Inventory inventory = Bukkit.createInventory(holder, 27, message("<dark_aqua>Chọn chế độ duel</dark_aqua>"));
+        holder.inventory = inventory;
+        holder.targets.put(11, "0");
+        put(inventory, 11, Material.PAPER, "<green>Đấu vui, không cược", "<gray>Không dùng economy.", "<gray>Nhấn để gửi lời mời.");
+        double configuredMaxWager = getConfig().getDouble("duel.max-wager", 1_000_000);
+        double maxWager = Double.isFinite(configuredMaxWager)
+                ? Math.min(Double.MAX_VALUE / 2, Math.max(0, configuredMaxWager)) : 1_000_000;
+        boolean hasWagerOption = false;
+        boolean economyAvailable = rewardService.isEconomyAvailable();
+        if (economyAvailable) {
+            for (int i = 0; i < 3; i++) {
+                int slot = 13 + i * 2;
+                int stake = 10 * (i + 1);
+                if (stake > maxWager) continue;
+                String amount = Integer.toString(stake);
+                holder.targets.put(slot, amount);
+                put(inventory, slot, Material.GOLD_INGOT, "<gold>Cược " + amount, "<gray>Mỗi người cược " + amount + ".", "<gray>Người thắng nhận cả hai phần.");
+                hasWagerOption = true;
+            }
+        }
+        if (!economyAvailable) {
+            put(inventory, 15, Material.BARRIER, "<red>Chưa có economy", "<gray>Cài Vault và plugin economy để bật cược.");
+        } else if (!hasWagerOption) {
+            put(inventory, 15, Material.BARRIER, "<red>Cược đã tắt", "<gray>Tăng duel.max-wager để bật cược.");
+        }
+        challenger.openInventory(inventory);
+    }
+
+    private enum MenuMode { MAIN, REWARDS, WINS, DUEL_TARGET, DUEL_WAGER }
     private final class MenuHolder implements InventoryHolder {
         private final MenuMode mode;
         private final Map<Integer,String> targets = new HashMap<>();
+        private String duelTarget;
         private Inventory inventory;
         private MenuHolder(MenuMode mode) { this.mode = mode; }
         @Override public Inventory getInventory() { return inventory; }
@@ -1034,10 +1279,10 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
     }
 
     private final class WordGame {
-        private String lastWord = ""; private int moves; private boolean active;
+        private String lastWord = "", previousWord = ""; private int moves; private boolean active;
         private UUID lastPlayer; private long lastMoveAt;
         private final Map<String,Integer> used = new HashMap<>(); private int hardRun;
-        synchronized void start(String phrase) { used.clear(); lastWord = phrase; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; lastPlayer = null; lastMoveAt = System.currentTimeMillis(); active = true; if (displayService != null) displayService.start(phrase, moves); }
+        synchronized void start(String phrase) { used.clear(); lastWord = phrase; previousWord = ""; used.put(phrase,1); hardRun = initialHardRun(phrase); moves = 0; lastPlayer = null; lastMoveAt = System.currentTimeMillis(); active = true; if (displayService != null) displayService.start(phrase, moves); }
         synchronized void reset() { used.clear(); lastWord = ""; moves = 0; active = false; }
         synchronized void stop() { active = false; if (displayService != null) displayService.stop(); }
         synchronized boolean isActive() { return active; }
@@ -1047,15 +1292,16 @@ public final class WordChainPlugin extends JavaPlugin implements Listener, Comma
         synchronized boolean maySubmit(UUID player, long now, long minimumDelay, boolean antiSolo) { return active && (!antiSolo || lastPlayer == null || !lastPlayer.equals(player)) && now - lastMoveAt >= Math.max(0, minimumDelay); }
         synchronized void recordPlayer(UUID player, long now) { lastPlayer = player; lastMoveAt = now; }
         synchronized String requiredSyllable() { String[] parts = lastWord.split(" "); return parts[parts.length - 1]; }
-        synchronized boolean hasLegalContinuation() { return active && hasContinuation(lastWord, used, hardRun); }
+        synchronized boolean hasLegalContinuation() { return active && hasContinuation(lastWord, used, hardRun, previousWord); }
         synchronized boolean tryMove(String input, java.util.function.Predicate<String> dictionary) {
             if (!active) return false; String phrase = input; String[] parts = phrase.split(" ");
             if (parts.length != 2 || !parts[0].equals(requiredSyllable()) || !dictionary.test(phrase)) return false;
+            if (!GameplayRules.allowsNextPhrase(phrase, previousWord)) return false;
             if (!mayUseWord(used, phrase, getConfig().getInt("anti-abuse.word-use-limit", 3))) return false;
             int difficulty=getConfig().getInt("difficulty.words."+phrase,1), threshold=getConfig().getInt("difficulty.hard-threshold",4), maxHard=Math.max(1,getConfig().getInt("anti-abuse.max-hard-words-in-row",2));
             if(difficulty>=threshold&&hardRun>=maxHard)return false;
             if(difficulty>=threshold)hardRun++;else hardRun=0;
-            used.merge(phrase,1,Integer::sum); lastWord = phrase; moves++; return true;
+            used.merge(phrase,1,Integer::sum); previousWord = lastWord; lastWord = phrase; moves++; return true;
         }
     }
     @EventHandler public void onQuit(PlayerQuitEvent e){UUID id=e.getPlayer().getUniqueId();publicParticipants.remove(id);GameVote vote=gameVote;if(vote!=null&&vote.requester().equals(id))cancelGameVote("<yellow>Đề xuất " + voteActionName(vote.action()) + " bị hủy vì người đề xuất đã rời máy chủ.");DuelMatch match=duels.get(id);if(match!=null)finishDuel(match,otherPlayer(match,id),"Đối thủ rời máy chủ.");duelInvites.remove(id);wrongMoveNotice.remove(id);reportCooldown.remove(id);}

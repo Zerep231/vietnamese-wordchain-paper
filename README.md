@@ -1,114 +1,121 @@
 # WordChain
 
-Plugin nối từ tiếng Việt cho Paper, với chế độ chơi công khai và đấu tay đôi, menu GUI, bảng xếp hạng, phần thưởng và từ điển có thể nhập thêm.
+Plugin mini-game nối từ tiếng Việt cho Paper. Hỗ trợ ván công khai, đấu tay đôi có hoặc không cược, menu trong game, bảng xếp hạng và tích hợp cho plugin bên ngoài.
 
-> **Phiên bản:** 1.4.0 · **Yêu cầu:** Java 25 và Paper 26.1 trở lên. Maven biên dịch với Paper API 26.3.
+![Java 25](https://img.shields.io/badge/Java-25-orange) ![Paper](https://img.shields.io/badge/Paper-26.1%2B-blue) ![License](https://img.shields.io/badge/License-MIT-green)
 
-## Tính năng
+## Tương thích
 
-- Chơi nối cụm từ tiếng Việt gồm đúng hai âm tiết; dữ liệu được chuẩn hóa Unicode NFC và không phân biệt hoa thường.
-- Menu trong game, ván công khai, duel riêng, lời mời/accept/deny, bỏ phiếu bắt đầu lại ván công khai.
-- Giới hạn dùng lại từ, giới hạn từ khó liên tiếp, tránh lặp từ khóa mở đầu gần đây và tự khởi tạo ván mới khi không còn nước hợp lệ.
-- Thống kê thắng/chuỗi thắng và top 10 được lưu trong SQLite.
-- Phần thưởng vật phẩm, tích hợp Vault tùy chọn và lệnh thưởng tùy chỉnh.
-- Nhập từ điển bất đồng bộ từ danh sách văn bản, JSON, Kaikki JSONL hoặc gói dữ liệu từ điển; dữ liệu đã nhập được lưu/cache trong SQLite.
-- Tích hợp PlaceholderAPI tùy chọn và API Java cho plugin khác.
+- **Java:** 25
+- **Paper:** 26.1 trở lên; build dùng Paper API 26.3
+- **Tùy chọn:** PlaceholderAPI; Vault cùng một economy provider nếu bật cược duel
+- **Lưu trữ:** SQLite cục bộ trong thư mục plugin
 
-## Cài đặt
+## Tính năng chính
+
+- Chuẩn hóa tiếng Việt Unicode NFC, bỏ khác biệt hoa thường và lập chỉ mục từ theo âm tiết để tra cứu nhanh.
+- Chat nối từ chỉ được xử lý cho người đã tham gia ván công khai; người xem vẫn chat bình thường.
+- Chặn lặp từ theo giới hạn cấu hình, chống solo, kiểm tra thời gian phản ứng và loại chu kỳ đảo ngược tức thời như `kia đó → đó kia → kia đó`.
+- Duel riêng có thời gian lượt, giới hạn trận, chọn đấu vui hoặc cược qua Vault.
+- Cược chỉ được trừ khi người nhận chấp thuận; người thắng nhận pot. Trận hòa hoặc dừng bình thường sẽ hoàn cược.
+- BossBar, ActionBar, GUI, reward theo chuỗi thắng, báo từ thiếu và công cụ quản trị.
+- Top 10 PlaceholderAPI và API bất đồng bộ để plugin menu, scoreboard, hologram dùng dữ liệu.
+- Nạp từ điển nền từ nguồn văn bản, TSV, JSON array, Kaikki JSONL hoặc archive được cấu hình.
+
+## Cài đặt nhanh
 
 1. Cài Java 25 và Paper 26.1+.
-2. Tải JAR từ mục **Releases**, hoặc tự build theo hướng dẫn bên dưới.
-3. Đặt `word-chain-1.4.0.jar` vào thư mục `plugins/` rồi khởi động máy chủ.
-4. Chỉnh `plugins/WordChain/config.yml`. Sau khi thay đổi, chạy `/wordchain reload`.
+2. Tải `word-chain-1.5.0.jar` từ [GitHub Releases](https://github.com/Zerep231/vietnamese-wordchain-paper/releases).
+3. Chép JAR vào `plugins/`, rồi khởi động máy chủ.
+4. Chỉnh `plugins/WordChain/config.yml`; dùng `/noitu reload` để nạp lại cấu hình.
 
-SQLite JDBC được khai báo trong `plugin.yml` dưới dạng thư viện Paper tải khi khởi động. Vault và PlaceholderAPI là tùy chọn; cài plugin tương ứng để bật tích hợp.
+Paper tải SQLite JDBC theo khai báo trong `plugin.yml`. PlaceholderAPI và Vault là tùy chọn, không cần có để plugin chạy.
 
 ## Build và kiểm thử
+
+Cần JDK 25 và Maven 3.9 trở lên.
 
 ```bash
 mvn clean verify
 ```
 
-Lệnh build cần JDK 25 cùng Maven 3.9+. JAR đầu ra: `target/word-chain-1.4.0.jar`.
+JAR được tạo tại `target/word-chain-1.5.0.jar`. GitHub Actions chạy cùng lệnh build khi có tag `v*` và đính kèm JAR phù hợp với tag vào GitHub Release.
 
-## Lệnh và quyền
+## Lệnh
 
-Các lệnh có thể dùng qua `/wordchain`, alias `/wc` hoặc `/noitu`.
+Alias lệnh: `/wordchain`, `/wc`, `/noitu`.
 
-| Lệnh | Tác dụng | Quyền |
+| Lệnh | Mô tả | Quyền |
 | --- | --- | --- |
-| `/wordchain` hoặc `/wordchain menu` | Mở menu trò chơi | `wordchain.menu` |
-| `/wordchain start [cụm-từ]` | Bắt đầu ván công khai | `wordchain.play` |
-| `/wordchain stop` | Mở vote dừng ván; admin dừng trực tiếp | `wordchain.play` hoặc `wordchain.admin` |
-| `/wordchain reset` | Đề xuất mở ván công khai mới | `wordchain.play` |
-| `/wordchain vote <yes\|no>` | Bỏ phiếu cho đề xuất dừng hoặc reset | `wordchain.vote` |
-| `/wordchain duel <người-chơi> [giây\|off]` | Mời đấu tay đôi | `wordchain.duel` |
-| `/wordchain accept` · `/wordchain deny` | Nhận hoặc từ chối lời mời | `wordchain.duel.respond` |
-| `/wordchain top` | Xem bảng xếp hạng thắng | `wordchain.top` |
-| `/wordchain wins <người-chơi>` | Xem thống kê người chơi | `wordchain.stats` |
-| `/wordchain report <cụm-từ>` | Báo từ còn thiếu hoặc cần xem xét | `wordchain.report` |
-| `/wordchain add <cụm-từ>` · `/wordchain remove <cụm-từ>` | Sửa từ điển runtime | `wordchain.admin` |
-| `/wordchain import` | Nhập lại các nguồn từ điển cấu hình | `wordchain.admin` |
-| `/wordchain reload` | Tải lại cấu hình | `wordchain.admin` |
-| `/wordchain skip` | Bỏ qua từ hiện tại | `wordchain.admin` |
-| `/wordchain rewards` · `/wordchain reward ...` | Xem/chỉnh phần thưởng | `wordchain.rewards` |
-| `/wordchain difficulty <âm-đầu> <âm-cuối> <1-5>` | Đặt độ khó cụm từ | `wordchain.admin` |
-| `/wordchain reports`, `/approve`, `/reject` | Quản lý báo cáo từ | `wordchain.admin` |
+| `/noitu` hoặc `/noitu menu` | Mở menu trò chơi | `wordchain.menu` |
+| `/noitu start [cụm từ]` | Mở ván công khai; người chơi tham gia bằng accept | `wordchain.play` |
+| `/noitu accept` · `/noitu join` | Nhận lời mời duel hoặc tham gia ván công khai | `wordchain.duel.respond` · `wordchain.play` |
+| `/noitu stop` | Người chơi đề xuất vote dừng; admin dừng ngay | `wordchain.play` · `wordchain.admin` |
+| `/noitu reset` | Đề xuất mở ván công khai mới qua vote | `wordchain.play` |
+| `/noitu vote <yes\|no>` | Bỏ phiếu cho đề xuất đang mở | `wordchain.vote` |
+| `/noitu duel <player> [seconds\|off] [wager]` | Mời duel; cược bỏ qua hoặc đặt 0 để đấu vui | `wordchain.duel` |
+| `/noitu deny` | Từ chối lời mời duel | `wordchain.duel.respond` |
+| `/noitu top` · `/noitu wins <player>` | Xem top 10 hoặc thống kê người chơi | `wordchain.top` · `wordchain.stats` |
+| `/noitu report <tiếng1 tiếng2>` | Báo cụm từ thiếu | `wordchain.report` |
+| `/noitu add <tiếng1 tiếng2>` · `/noitu remove <tiếng1 tiếng2>` | Quản lý từ điển runtime | `wordchain.admin` |
+| `/noitu import` · `/noitu reload` · `/noitu skip` | Nhập từ, tải lại config, bỏ qua từ hiện tại | `wordchain.admin` |
+| `/noitu rewards` · `/noitu reward ...` | Xem hoặc chỉnh phần thưởng | `wordchain.rewards` |
+| `/noitu difficulty <tiếng1> <tiếng2> <1-5>` | Đặt độ khó cụm từ | `wordchain.admin` |
 
-`wordchain.player` là nhóm quyền mặc định cho người chơi và bao gồm quyền chơi, menu, top, duel, báo từ và vote. `wordchain.admin` mặc định dành cho operator. Khi người chơi dùng `/wordchain stop`, plugin mở vote; ngưỡng đồng ý là ít nhất 1/3 số người chơi online lúc mở vote (làm tròn lên), người đề xuất không được tự bỏ phiếu và vote hết hạn theo `game.reset-vote-seconds`. Admin có thể dùng cùng lệnh để dừng ván ngay. Có thể đặt `game.members-can-control: false` để chỉ admin được start/stop/reset.
+Quyền cơ bản được gom trong `wordchain.player` và mặc định mở cho người chơi. Quyền quản trị mặc định dành cho operator. Đặt `game.members-can-control: false` để chỉ admin điều khiển start/reset và đề xuất dừng.
+
+## Duel có cược
+
+Duel mặc định là đấu vui, không cược. Khi đã cài Vault và economy provider, có thể mời cược với cú pháp:
+
+```text
+/noitu duel Steve 30 50
+/noitu duel Steve off 50
+```
+
+Mức cược là số tiền **mỗi người** đóng, tối đa hai chữ số thập phân. Lời mời ghi rõ mức cược; cả hai bên phải đủ tiền và người được mời phải chấp nhận. Người thắng nhận tổng tiền cược của hai bên. Trận kết thúc không có người thắng sẽ hoàn cược. Khi chọn duel trong GUI, người chơi có thể chọn đấu vui hoặc một trong các mức cược nhanh.
+
+Giới hạn mỗi bên bằng `duel.max-wager` trong config. Đặt giá trị `0` để tắt cược nhưng vẫn giữ duel miễn phí.
 
 ## Cấu hình
 
-Cấu hình mặc định nằm ở `src/main/resources/config.yml`; bản đang chạy nằm tại `plugins/WordChain/config.yml`.
+File mặc định: `src/main/resources/config.yml`. File runtime: `plugins/WordChain/config.yml`.
 
-| Nhóm | Tùy chọn chính |
+| Nhóm | Các tùy chọn đáng chú ý |
 | --- | --- |
-| `game` | Số lượt để thắng, quyền điều khiển, độ dài cụm từ, độ trễ ván tiếp theo và thời hạn vote reset |
-| `dictionary` | Danh sách nguồn, tự làm mới lúc khởi động, timeout tải dữ liệu |
-| `rewards` | Danh sách vật phẩm, bật/tắt Vault, tiền cơ bản và lệnh console |
-| `streak-rewards` | Tỉ lệ thưởng theo chuỗi thắng và giới hạn hệ số/vật phẩm |
-| `anti-abuse` | Chống solo, thời gian phản ứng tối thiểu, giới hạn lặp từ và từ khó liên tiếp |
-| `display` | Thời lượng lượt, nội dung BossBar và ActionBar (MiniMessage) |
-| `duel` | Số lượt, thời gian nhận lời mời, thời gian mỗi lượt và giới hạn trận |
-| `menu`, `reports`, `difficulty` | Tiêu đề menu, cooldown báo từ và ngưỡng/độ khó |
+| `game` | Mục tiêu lượt, quyền điều khiển, độ dài cụm từ, timeout vote và thời gian giữa các ván |
+| `dictionary` | URL nguồn, timeout tải, nạp lại khi khởi động |
+| `anti-abuse` | Chống solo, độ trễ phản ứng, giới hạn lặp và chuỗi cụm khó |
+| `display` · `menu` | Thời gian lượt, MiniMessage cho BossBar/ActionBar và tiêu đề GUI |
+| `duel` | Số lượt thắng, thời gian lời mời/lượt/trận, trần cược `max-wager` |
+| `rewards` · `streak-rewards` | Vật phẩm, tiền Vault, lệnh console và hệ số streak |
+| `difficulty` · `reports` | Mức khó cụm từ và cooldown báo từ |
 
-Ví dụ nguồn từ điển được hỗ trợ:
-
-```yaml
-dictionary:
-  refresh-on-start: true
-  request-timeout-seconds: 20
-  sources:
-    - "plain|https://example.org/vietnamese-phrases.txt"
-    - "tab|https://example.org/phrases.tsv"
-    - "json-array|https://example.org/phrases.json"
-    - "kaikki|https://example.org/vietnamese.jsonl.gz"
-    - "tu-dien-archive|https://example.org/dictionary.tar.gz"
-```
-
-Mỗi nguồn cần được rà soát giấy phép và nguồn gốc dữ liệu trước khi dùng hoặc phân phối lại. Danh sách mặc định trong config lấy từ các dự án bên thứ ba; plugin không đóng gói sẵn những bộ dữ liệu đó. Chỉ các mục tiếng Việt gồm đúng hai âm tiết mới được đưa vào chỉ mục trò chơi.
+Các loại nguồn từ điển: `plain|URL`, `tab|URL`, `json-array|URL`, `kaikki|URL`, `tu-dien-archive|URL`. Nguồn chỉ được thêm sau khi kiểm tra giấy phép và nguồn gốc dữ liệu. Plugin không đóng gói sẵn các bộ dữ liệu bên thứ ba.
 
 ## PlaceholderAPI
 
-Khi PlaceholderAPI được cài, expansion nội bộ `wordchain` cung cấp:
+Expansion tích hợp có identifier `wordchain`. Các placeholder top được cache và cập nhật khi có chiến thắng hoặc theo chu kỳ, không truy vấn SQLite đồng bộ từ callback PlaceholderAPI.
 
 | Placeholder | Giá trị |
 | --- | --- |
-| `%wordchain_active%` | Ván công khai có đang chạy không |
-| `%wordchain_word%` hoặc `%wordchain_keyword%` | Từ khóa hiện tại |
-| `%wordchain_moves%` | Số lượt hợp lệ hiện tại |
-| `%wordchain_dictionary_size%` | Số cụm từ trong từ điển runtime |
+| `%wordchain_active%` | Ván công khai đang chạy |
+| `%wordchain_word%` · `%wordchain_keyword%` | Từ hiện tại |
+| `%wordchain_moves%` | Số lượt hợp lệ |
+| `%wordchain_dictionary_size%` | Số cụm từ đã nạp |
+| `%wordchain_participating%` | Người chơi hiện tại đã vào ván công khai |
+| `%wordchain_duel_active%` · `%wordchain_duel_wager%` | Trạng thái duel và cược mỗi bên |
+| `%wordchain_top_<1-10>_name%` · `%wordchain_top_<1-10>_wins%` | Tên và số trận thắng theo hạng |
+| `%wordchain_top_<1-10>_streak%` · `%wordchain_top_<1-10>_best_streak%` | Streak hiện tại và cao nhất |
 
-## API cho plugin khác
+## Tích hợp menu và API
 
-Plugin đăng ký `WordChainApi` qua Bukkit ServicesManager. API phát `WordChainMoveEvent` và `WordChainWinEvent`; các thao tác đọc dữ liệu SQLite trả về `CompletionStage` để tránh chặn luồng server.
+ZMenu hoặc plugin giao diện khác có thể gọi `/noitu menu`, `/noitu duel ...`, `/noitu top` và dùng PlaceholderAPI ở trên để dựng menu/scoreboard riêng. Không cần thêm dependency bắt buộc vào WordChain.
 
-## Lưu trữ và hiệu năng
+Plugin đăng ký `com.example.wordchain.api.WordChainApi` trong Bukkit ServicesManager. API hỗ trợ kiểm tra trạng thái/từ, mở GUI, đọc wins và lấy leaderboard bất đồng bộ qua `CompletionStage`. Plugin cũng phát `WordChainMoveEvent` và `WordChainWinEvent`.
 
-Từ điển runtime, cache nguồn và thống kê được lưu trong `plugins/WordChain/wordchain.db`. Nạp/nhập từ điển và truy vấn dữ liệu bất đồng bộ; xử lý chat chuyển cập nhật thế giới và người chơi về main thread. Các lượt chat chỉ được đưa vào xử lý khi có dạng hai âm tiết phù hợp.
+## Dữ liệu và giới hạn
 
-Phiên bản hiện tại dùng SQLite cục bộ cho từng server. Redis Pub/Sub, MySQL và đồng bộ ván/bảng xếp hạng xuyên server chưa được triển khai; chạy sau Velocity/BungeeCord không tự tạo trạng thái game chung.
+Từ điển, cache nguồn và thống kê được lưu trong `plugins/WordChain/wordchain.db`. Mỗi server hiện dùng SQLite riêng; Redis, MySQL và đồng bộ trận/top xuyên Velocity hoặc BungeeCord chưa được triển khai.
 
-## Giấy phép và dữ liệu
-
-Mã nguồn plugin được phát hành theo MIT; xem [LICENSE](LICENSE). Dữ liệu từ điển là nguồn độc lập và có thể có điều khoản riêng. Đọc điều khoản của nhà cung cấp trước khi nhập hoặc chia sẻ lại dữ liệu đã nhập.
+Mã nguồn theo MIT (xem [LICENSE](LICENSE)). Dữ liệu nhập từ nguồn ngoài có thể có giấy phép khác; chủ server chịu trách nhiệm rà soát điều khoản trước khi phân phối lại dữ liệu.

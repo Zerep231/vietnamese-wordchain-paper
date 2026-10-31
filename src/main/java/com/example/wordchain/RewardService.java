@@ -4,7 +4,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.plugin.Plugin;
 
-import java.lang.reflect.Method;
 import java.util.UUID;
 
 /** Optional Vault bridge kept reflective so Vault remains a soft dependency. */
@@ -16,7 +15,7 @@ public final class RewardService {
         if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Rewards must run on the server thread");
         double base = plugin.getConfig().getDouble("rewards.economy.base", 0);
         double rewardMultiplier = multiplier(streak);
-        if (plugin.getConfig().getBoolean("rewards.economy.enabled", true) && base > 0) deposit(playerId, base * rewardMultiplier);
+        if (plugin.getConfig().getBoolean("rewards.economy.enabled", true) && base > 0) depositWager(playerId, base * rewardMultiplier);
         OfflinePlayer player = Bukkit.getOfflinePlayer(playerId);
         for (String command : plugin.getConfig().getStringList("rewards.commands")) {
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command.replace("{player}", player.getName() == null ? playerId.toString() : player.getName())
@@ -32,16 +31,53 @@ public final class RewardService {
         return Math.min(cap, 1.0 + rate * (Math.log(Math.max(1, streak)) / Math.log(2)));
     }
 
-    private void deposit(UUID id, double amount) {
+    public boolean isEconomyAvailable() {
+        requireMainThread();
+        return economyProvider() != null;
+    }
+
+    public boolean hasFunds(UUID playerId, double amount) {
+        requireMainThread();
+        try {
+            Object provider = economyProvider();
+            if (provider == null) return false;
+            Class<?> economyClass = Class.forName("net.milkbowl.vault.economy.Economy");
+            return (boolean) economyClass.getMethod("has", OfflinePlayer.class, double.class)
+                    .invoke(provider, Bukkit.getOfflinePlayer(playerId), amount);
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) { return false; }
+    }
+
+    public boolean withdrawWager(UUID playerId, double amount) {
+        requireMainThread();
+        return transact(playerId, amount, "withdrawPlayer");
+    }
+
+    public boolean depositWager(UUID playerId, double amount) {
+        requireMainThread();
+        return transact(playerId, amount, "depositPlayer");
+    }
+
+    private boolean transact(UUID playerId, double amount, String operation) {
+        if (!Double.isFinite(amount) || amount <= 0) return false;
+        try {
+            Object provider = economyProvider();
+            if (provider == null) return false;
+            Class<?> economyClass = Class.forName("net.milkbowl.vault.economy.Economy");
+            Object response = economyClass.getMethod(operation, OfflinePlayer.class, double.class)
+                    .invoke(provider, Bukkit.getOfflinePlayer(playerId), amount);
+            return (boolean) response.getClass().getMethod("transactionSuccess").invoke(response);
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) { return false; }
+    }
+
+    private Object economyProvider() {
         try {
             Class<?> economyClass = Class.forName("net.milkbowl.vault.economy.Economy");
-            Object registration = Bukkit.getServicesManager().getRegistration(economyClass);
-            if (registration == null) return;
-            Object provider = registration.getClass().getMethod("getProvider").invoke(registration);
-            Method deposit = economyClass.getMethod("depositPlayer", OfflinePlayer.class, double.class);
-            deposit.invoke(provider, Bukkit.getOfflinePlayer(id), amount);
-        } catch (ReflectiveOperationException | LinkageError ignored) {
-            // Vault is optional; item and command rewards continue to work without it.
-        }
+            org.bukkit.plugin.RegisteredServiceProvider<?> registration = Bukkit.getServicesManager().getRegistration(economyClass);
+            return registration == null ? null : registration.getProvider();
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) { return null; }
+    }
+
+    private void requireMainThread() {
+        if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Economy operations must run on the server thread");
     }
 }

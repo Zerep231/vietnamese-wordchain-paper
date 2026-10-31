@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0
+- Public game chat interception is limited to opted-in participants; spectators can use normal chat freely.
+- Added optional consensual Vault wagers to duels, quick stake choices in the duel menu, payout/refund handling, a configurable wager cap, and decimal precision validation.
+- Prevented immediate two-phrase reversals that caused circular chains in public games and duels.
+- Exposed an asynchronous leaderboard API and cached PlaceholderAPI fields for external menus, scoreboards, and holograms.
+- Added focused gameplay rule tests and made release artifact naming derive from the pushed version tag.
+
 ## 1.4.0
 - Changed `/wordchain stop` for regular players to a public vote using the existing one-third quorum and timeout; admins can stop immediately.
 - Unified stop/reset proposals under a shared vote model and cancel pending votes safely when a round changes or its requester leaves.
