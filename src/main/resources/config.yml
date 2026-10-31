@@ -7,6 +7,8 @@ game:
   recent-start-limit: 20
   # Shared expiry for public stop/reset votes (clamped to 5-120 seconds).
   reset-vote-seconds: 30
+  # Cancel a public match after this many idle minutes; the last player to connect wins.
+  idle-timeout-minutes: 15
 rewards:
   # Bukkit material names and positive integer amounts. Invalid entries are skipped with a warning.
   items:
@@ -56,5 +58,11 @@ duel:
   default-connect-seconds: 30
   invite-expiry-seconds: 60
   max-match-seconds: 3600
+  # auto selects Vault when an economy is installed, otherwise fallback-item.
+  default-stake-type: auto
+  fallback-item: DIAMOND
+  # Vault uses max-wager; item wagers use max-item-stake.
+  max-wager: 1000000
+  max-item-stake: 64
   # Maximum optional stake per player. Requires Vault plus an economy provider; 0 disables betting.
   max-wager: 1000000
